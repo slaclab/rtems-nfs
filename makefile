@@ -22,7 +22,10 @@ m: mnt.o rpcio.o
 	$(CC) -c -o $@ $(CFLAGS) $^
 
 nfs.obj: nfs.o
-	$(LD) -o $@ -r -Lproto $^ -lnfsprot
+	$(LD) -o $@ -r $^ -Lproto  -lnfsprot
+
+rpcio.obj: rpcio.o xdr_mbuf.o sock_mbuf.o
+	$(LD) -o $@ -r $^
 
 clean:
 	$(RM) *.o m *.obj

@@ -32,6 +32,7 @@
 #define LD_XACT_HASH	8
 #define XACT_HASHS		(1<<(LD_XACT_HASH))
 #define XACT_HASH_MSK	((XACT_HASHS)-1)
+#define MBUF_RX			/* use mbuf XDR stream for decoding directly out of mbufs */
 
 #undef  DEBUG
 
@@ -64,6 +65,12 @@ typedef	rtems_interval		TimeoutT;
 typedef struct timeval		TimeoutT;
 #endif
 
+
+#if defined(MBUF_RX) && !defined(__rtems)
+#warning MBUF_RX is only supported on RTEMS; disabling
+#undef	 MBUF_RX
+#endif
+
 /* 100000th implementation of a doubly linked list;
  * since only one thread is looking at these,
  * we need no locking
@@ -85,6 +92,14 @@ typedef union  RpcBufU_ {
 		char				buf[1];
 } RpcBufU, *RpcBuf;
 
+#ifdef MBUF_RX
+typedef	struct mbuf *		RxBuf;	/* an MBUF chain */
+static  void   bufFree(struct mbuf *m);
+#else
+typedef RpcBuf				RxBuf;
+#define	bufFree(b)	do { FREE(b); } while(0)
+#endif
+
 /* A RPC 'transaction' consisting
  * of server and requestor information,
  * buffer space and an XDR object
@@ -105,7 +120,7 @@ typedef struct RpcUdpXactRec_ {
 		caddr_t				pres;
 		int					ibufsize;	/* size of the obuf */
 		int					obufsize;	/* size of the obuf */
-		RpcBuf				ibuf;
+		RxBuf				ibuf;
 		RpcBufU				obuf;
 } RpcUdpXactRec;
 
@@ -119,6 +134,9 @@ typedef struct RpcUdpXactPoolRec_ {
 #endif
 
 static RpcUdpXact xactHashTbl[XACT_HASHS]={0};
+
+static RpcUdpXact
+sockRcv(RxBuf *pibuf, int ibufsize);
 
 static int				ourSock = -1;
 #ifdef __rtems
@@ -287,7 +305,7 @@ int i = xact->obuf.xid & XACT_HASH_MSK;
 		xactHashTbl[i]=0;
 		HASH_TBL_UNLOCK();
 
-		FREE(xact->ibuf);
+		bufFree(xact->ibuf);
 
 		XDR_DESTROY(&xact->xdrs);
 		FREE(xact);
@@ -360,6 +378,10 @@ va_list			ap;
 	return RPC_SUCCESS;
 }
 
+#ifdef MBUF_RX
+extern void xdrmbuf_create(XDR *, struct mbuf *, enum xdr_op);
+#endif
+
 /* Block for the RPC reply to an outstanding
  * transaction.
  * The caller is woken by the RPC daemon either
@@ -382,11 +404,16 @@ rtems_event_set		gotEvents;
 			RTEMS_WAIT | RTEMS_EVENT_ANY,
 			RTEMS_NO_TIMEOUT,
 			&gotEvents);
-	if (xact->status.re_status)
+	if (xact->status.re_status) {
 		return xact->status.re_status;
+	}
 #endif
 
+#ifdef MBUF_RX
+	xdrmbuf_create(&reply_xdrs, xact->ibuf, XDR_DECODE);
+#else
 	xdrmem_create(&reply_xdrs, xact->ibuf->buf, xact->ibufsize, XDR_DECODE);
+#endif
 
 	reply_msg.acpted_rply.ar_verf          = _null_auth;
 	reply_msg.acpted_rply.ar_results.where = xact->pres;
@@ -413,7 +440,7 @@ rtems_event_set		gotEvents;
 	}
 	XDR_DESTROY(&reply_xdrs);
 
-	FREE(xact->ibuf);
+	bufFree(xact->ibuf);
 	xact->ibuf     = 0;
 	xact->ibufsize = 0;
 
@@ -437,49 +464,11 @@ int len = (int)XDR_GETPOS(&xact->xdrs);
 	return RPC_SUCCESS;
 }
 
-/* receive from a socket and find
- * the transaction corresponding to the
- * transaction ID received in the server
- * reply.
- */
-static RpcUdpXact
-sockRcv(RpcBuf *pibuf, int ibufsize)
-{
-int					len,i;
-RpcUdpXact			xact = 0;
-RpcBuf				ibuf     = *pibuf;
-struct sockaddr_in	fromAddr;
-int					fromLen  = sizeof(fromAddr);
-
-	len = recvfrom(ourSock,
-				   ibuf->buf, ibufsize,
-				   0,
-				   (struct sockaddr*)&fromAddr, &fromLen);
-
-	if (len <= 0) {
-		if (EAGAIN != errno)
-			fprintf(stderr,"RECV failed: %s\n",strerror(errno));
-		goto cleanup;
-	}
-
-	i = ibuf->xid & XACT_HASH_MSK;
-
-	if ( !(xact=xactHashTbl[i])   ||
-		   xact->obuf.xid                     != ibuf->xid					|| 
-		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
-		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
-		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
-		xact = 0;
-		goto cleanup;
-	}
-	xact->ibufsize = ibufsize;
-	xact->ibuf     = ibuf;
-	*pibuf         = 0;
-
-cleanup:
-
-	return xact;
-}
+#ifdef MBUF_RX
+#define XID(ibuf) (*(mtod((ibuf), u_long *)))
+#else
+#define XID(ibuf) ((ibuf)->xid)
+#endif
 
 
 #ifdef __rtems
@@ -604,7 +593,7 @@ enum clnt_stat	stat;
 fd_set			rset;
 struct timeval	tmp;
 int				sel_err;
-RpcBuf			buf = 0;
+RxBuf			buf = 0;
 #endif
 		if (stat = rpcUdpSend(xact, xact->server, timeout, proc,
 					xres, pres,
@@ -627,7 +616,7 @@ RpcBuf			buf = 0;
 			if (sel_err > 0) {
 				/* OK */
 				if (!buf) {
-					buf = (RpcBuf)MALLOC(UDPMSGSIZE);
+					buf = (RxBuf)MALLOC(UDPMSGSIZE);
 				}
 				if ( sockRcv(&buf, UDPMSGSIZE) )
 					return rpcUdpRcv(xact);
@@ -635,7 +624,7 @@ RpcBuf			buf = 0;
 			}
 		} while (xact->retrans--);
 
-		FREE(buf);
+		bufFree(buf);
 
 		return RPC_TIMEDOUT;
 #else
@@ -678,7 +667,7 @@ rtems_id		 q;
 ListNodeRec		 listHead={0};
 ListNode		 newList;
 rtems_unsigned32 size;
-RpcBuf			 buf = 0;
+RxBuf			 buf = 0;
 
 	assert( RTEMS_SUCCESSFUL == rtems_clock_get(
 									RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
@@ -734,18 +723,28 @@ RpcBuf			 buf = 0;
 			fprintf(stderr,"RPCIO: got RX event\n");
 #endif
 
+#ifndef MBUF_RX
 			if (!buf) {
-				buf=(RpcBuf)MALLOC(UDPMSGSIZE);
+				buf=(RxBuf)MALLOC(UDPMSGSIZE);
 			}
+#endif
 			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
 				/* extract from the retransmission list */
 				nodeXtract(&xact->node);
 				/* wakeup requestor */
 				xact->status.re_status = RPC_SUCCESS;
 				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+#ifndef MBUF_RX
 				if (!buf)
 					buf = (RpcBuf)MALLOC(UDPMSGSIZE);
+#else
+				assert( !buf );
+#endif
 			}
+#ifdef  MBUF_RX
+			bufFree(buf);
+			buf = 0;
+#endif
 		}
 
 		rtems_clock_get(
@@ -865,7 +864,7 @@ RpcBuf			 buf = 0;
 	}
 #endif
 
-	FREE(buf);
+	bufFree(buf);
 
 	rtems_message_queue_delete(q);
 
@@ -982,6 +981,74 @@ RpcUdpXactPool pool;
 								&xact,
 								sizeof(xact)))
 		rpcUdpXactDestroy(xact);
+}
+
+#ifdef MBUF_RX
+
+#include <sys/mbuf.h>
+
+ssize_t
+rcv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, int *fromlen);
+
+static void
+bufFree(struct mbuf *m)
+{
+	if (m) {
+		rtems_bsdnet_semaphore_obtain();
+		m_freem(m);
+		rtems_bsdnet_semaphore_release();
+	}
+}
+#endif
+
+/* receive from a socket and find
+ * the transaction corresponding to the
+ * transaction ID received in the server
+ * reply.
+ */
+static RpcUdpXact
+sockRcv(RxBuf *pibuf, int ibufsize)
+{
+int					len,i;
+u_long				xid;
+RpcUdpXact			xact = 0;
+struct sockaddr_in	fromAddr;
+int					fromLen  = sizeof(fromAddr);
+
+#ifdef MBUF_RX
+	len = rcv_mbuf_from(ourSock,
+					pibuf,
+					UDPMSGSIZE,
+				   (struct sockaddr*)&fromAddr, &fromLen);
+#else
+	len  = recvfrom(ourSock,
+				   (*pibuf)->buf, ibufsize,
+				   0,
+				   (struct sockaddr*)&fromAddr, &fromLen);
+#endif
+
+	if (len <= 0) {
+		if (EAGAIN != errno)
+			fprintf(stderr,"RECV failed: %s\n",strerror(errno));
+		goto cleanup;
+	}
+
+	i = (xid=XID(*pibuf)) & XACT_HASH_MSK;
+
+	if ( !(xact=xactHashTbl[i])   ||
+		   xact->obuf.xid                     != xid						|| 
+		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
+		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
+		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
+		xact = 0;
+		goto cleanup;
+	}
+	xact->ibuf     = *pibuf;
+	xact->ibufsize = ibufsize;
+	*pibuf         = 0;
+
+cleanup:
+	return xact;
 }
 
 

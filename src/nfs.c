@@ -1751,7 +1751,6 @@ RpcUdpServer		nfsServer = 0;
 int					e         = -1;
 char				*path     = mt_entry->dev;
 
-
 	host = path;
 	if (buildIpAddr(&path, &saddr))
 		return -1;
@@ -1776,6 +1775,7 @@ char				*path     = mt_entry->dev;
 		goto cleanup;
 	}
 
+
 	/* first, try to ping the NFS server by
 	 * calling the NULL proc.
 	 */
@@ -1791,7 +1791,6 @@ char				*path     = mt_entry->dev;
 		e = errno ? errno : EIO;
 		goto cleanup;
 	}
-
 
 	/* that seemed to work - we now try the
 	 * actual mount
