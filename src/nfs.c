@@ -5,6 +5,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <sys/stat.h>
+#include <dirent.h>
+
+#define  DIRENT_HEADER_SIZE ( sizeof(struct dirent) - \
+			sizeof( ((struct dirent *)0)->d_name ) )
 
 #include <nfs_prot.h>
 #include <mount_prot.h>
@@ -31,6 +36,7 @@
 
 #undef  TSILLDEBUG
 #define STATIC
+#define DEBUG
 
 static struct timeval _nfscalltimeout = { 10, 0 };
 static struct timeval _nfscallretry   = { 1,  0 };
@@ -79,6 +85,16 @@ rtems_interrupt_level		l;
 #endif
 	return rval;
 }
+
+typedef struct DirInfoRec_ {
+	readdirargs	readdirargs;
+	/* clone of the 'readdirres' fields;
+	 * the cookie is put into the readdirargs above
+	 */
+	nfsstat		status;
+	void		*buf;
+	int			len;
+} DirInfoRec, *DirInfo;
 
 /* a type better suited for node operations
  * than diropres.
@@ -183,6 +199,103 @@ xdr_serporid(XDR *xdrs, serporid *objp)
     return TRUE;
 }
 
+bool_t
+xdr_dir_info_entry(XDR *xdrs, DirInfo di)
+{
+union	{
+	char			nambuf[NFS_MAXNAMLEN+1];
+	nfscookie		cookie;
+}				dummy;
+struct dirent	*pde = (struct dirent *)di->buf;
+u_long			fileid;
+char			*name;
+register int	nlen,len;
+nfscookie		*pcookie;
+
+	len = di->len;
+
+	if ( !xdr_u_int(xdrs, &fileid) )
+		return FALSE;
+
+	/* we must pass the address of a char* */
+	name = (len > NFS_MAXNAMLEN) ? pde->d_name : dummy.nambuf;
+
+	if ( !xdr_filename(xdrs, &name) )
+		return FALSE;
+
+	if (len >= 0) {
+		len -= (nlen=strlen(name)) + 1;
+		pcookie = di->readdirargs.cookie;
+	} else {
+		pcookie = dummy.cookie;
+	}
+
+	/* if the cookie goes into the DirInfo, we hope this doesn't fail
+	 * - the caller ends up with an invalid readdirargs cookie otherwise...
+	 */
+	if ( !xdr_cookie(xdrs, pcookie) )
+		return FALSE;
+
+	di->len = len;
+	/* adjust the buffer pointer */
+	if (len >= 0) {
+		pde->d_ino    = fileid;
+		pde->d_namlen = nlen;
+		if (name == dummy.nambuf) {
+			memcpy(pde->d_name, dummy.nambuf, nlen + 1);
+		}
+		pde->d_reclen += nlen+1 /* string delimiter */ + 3 /* alignment */;
+		/* word align */
+		pde->d_reclen &= ~3;
+		di->buf += pde->d_reclen;
+	}
+
+	return TRUE;
+}
+
+bool_t
+xdr_dir_info(XDR *xdrs, DirInfo di)
+{
+DirInfo	dip;
+int		good,decoded;
+int		remaining;
+bool_t	endof;
+
+	if ( !xdr_nfsstat(xdrs, &di->status) )
+		return FALSE;
+
+	if ( NFS_OK != di->status )
+		return TRUE;
+
+	dip = di;
+
+	while (dip) {
+		/* reserve space for the dirent 'header' - we assume it's word aligned! */
+#ifdef DEBUG
+		assert( DIRENT_HEADER_SIZE % 4 == 0 );
+#endif
+		dip->len -= DIRENT_HEADER_SIZE;
+
+		/* we pass a 0 size - size is unused since
+		 * we always pass a non-NULL pointer
+		 */
+		if ( !xdr_pointer(xdrs, &dip, 0 /* size */, xdr_dir_info_entry) )
+			return FALSE;
+	}
+
+	if ( ! xdr_bool(xdrs, &endof) )
+		return FALSE;
+
+	if (endof && (dip->len -= DIRENT_HEADER_SIZE) >= 0) {
+		struct dirent *pde = (struct dirent *) di->buf;
+		pde->d_ino    = 0;
+		pde->d_reclen = DIRENT_HEADER_SIZE;
+		pde->d_namlen = 0;
+		dip->buf     += DIRENT_HEADER_SIZE;
+	}
+
+	return TRUE;
+}
 
 typedef struct NfsNodeRec_ {
 	serporid	serporid;
@@ -205,7 +318,9 @@ RpcUdpServer dbgSrv=0;
 static RpcUdpXactPool smallPool = 0;
 static RpcUdpXactPool bigPool   = 0;
 
-extern struct _rtems_filesystem_operations_table nfs_fs_ops;
+extern struct _rtems_filesystem_operations_table		nfs_fs_ops;
+extern struct _rtems_filesystem_file_handlers_r	nfs_file_file_handlers;
+extern struct _rtems_filesystem_file_handlers_r	nfs_dir_file_handlers;
 
 Nfs
 nfsCreate(RpcUdpServer server)
@@ -227,11 +342,18 @@ nfsDestroy(Nfs nfs)
 }
 
 static NfsNode
-nfsNodeCreate(void)
+nfsNodeCreate(nfs_fh *fh)
 {
 NfsNode	rval = malloc(sizeof(*rval));
 
 fprintf(stderr,"TSILL creating a node\n");
+
+	if (rval) {
+		if (fh)
+			memcpy( &SERP_FILE(rval), fh, sizeof(*fh) );
+	} else {
+		errno = ENOMEM;
+	}
 
 	return rval;
 }
@@ -511,19 +633,24 @@ STATIC int nfs_evalpath(
 	rtems_filesystem_location_info_t  *pathloc        /* IN/OUT */
 )
 {
-char			*p = strdup(pathname);
 char			*del, *part;
-NfsNode			node=nfsNodeCreate();
 int				e;
+NfsNode			node   = 0;
+char			*p     = strdup(pathname);
 RpcUdpServer	server = ((Nfs)pathloc->mt_entry->fs_info)->server;
 
-	if (!p || !node) {
+	if ( !p ) {
 		e = ENOMEM;
 		goto cleanup;
 	}
 
 	/* copy the start node */
 	memcpy(node, pathloc->node_access, sizeof(*node));
+ 	if ( ! (node = nfsNodeCreate( & SERP_FILE((NfsNode)pathloc->node_access))) ) {
+		e = ENOMEM;
+		goto cleanup;
+	}
+
 	pathloc->node_access = node;
 
 	for (part=p; part && *part; part=del) {
@@ -569,9 +696,10 @@ fprintf(stderr,"Errout \n");
 	}
 
 #ifndef TSILLDEBUG
-	fprintf(stderr,"Type %i, ino %i\n",
+	fprintf(stderr,"Type %i, ino %i, mode 0%o\n",
 					SERP_ATTR(node).type,
-					SERP_ATTR(node).fileid);
+					SERP_ATTR(node).fileid,
+					SERP_ATTR(node).mode);
 #endif
 
 	if (locIsRoot(pathloc)) {
@@ -584,6 +712,11 @@ fprintf(stderr,"Errout \n");
 		pathloc->node_access = pathloc->mt_entry->mt_fs_root.node_access;
 		nfsNodeDestroy(node);
 	} else {
+		switch (SERP_ATTR(node).type) {
+			case NFDIR:	pathloc->handlers = &nfs_dir_file_handlers;  break;
+			case NFREG:	pathloc->handlers = &nfs_file_file_handlers; break;
+			default: 	pathloc->handlers = &rtems_filesystem_null_handlers; break;
+		}
 		pathloc->node_access = node;
 	}
 	node = 0;
@@ -783,7 +916,7 @@ char				*path     = mt_entry->dev;
 	/* that seemed to work - we now create the root node
 	 * and we also must obtain the root node attributes
 	 */
-	assert( rootNode = nfsNodeCreate() );
+	assert( rootNode = nfsNodeCreate( (nfs_fh*)&fhstat.fhstatus_u.fhs_fhandle ) );
 
 	if ( nfscallSmall(  nfsServer,
 						NFSPROC_GETATTR,
@@ -794,10 +927,7 @@ char				*path     = mt_entry->dev;
 	} else if ( e = rootNode->serporid.status )
 		goto cleanup;
 
-	/* looks good so far; now copy the file handle */
-	memcpy( &SERP_FILE(rootNode),
-			&fhstat.fhstatus_u.fhs_fhandle,
-			sizeof(SERP_FILE(rootNode)) );
+	/* looks good so far */
 
 #ifndef TSILLDEBUG
 	dbgSrv = nfsServer;
@@ -814,7 +944,7 @@ char				*path     = mt_entry->dev;
 	rootNode = 0;
 
 	mt_entry->mt_fs_root.ops		 = &nfs_fs_ops;
-	mt_entry->mt_fs_root.handlers	 = &rtems_filesystem_null_handlers;
+	mt_entry->mt_fs_root.handlers	 = &nfs_dir_file_handlers;
 	mt_entry->pathconf_limits_and_options = nfs_limits_and_options;
 	mt_entry->fs_info				 = nfs;
 	nfs = 0;
@@ -975,155 +1105,364 @@ struct _rtems_filesystem_operations_table nfs_fs_ops = {
 		nfs_readlink,		/* OPTIONAL; may be NULL */
 };
 
+#if 0
+/* from rtems/libio.h for convenience */
+struct rtems_libio_tt {
+		rtems_driver_name_t              *driver;
+		off_t                             size;      /* size of file */
+		off_t                             offset;    /* current offset into file */
+		unsigned32                        flags;
+		rtems_filesystem_location_info_t  pathinfo;
+		Objects_Id                        sem;
+		unsigned32                        data0;     /* private to "driver" */
+		void                             *data1;     /* ... */
+		void                             *file_info; /* used by file handlers */
+		rtems_filesystem_file_handlers_r *handlers;  /* type specific handlers */
+};
+#endif
+
 /*
  *  File Handler Operations Table
  */
 
 #ifdef DECLARE_BODY
-static int nfs_open(
+static int nfs_file_open(
 	rtems_libio_t *iop,
 	const char    *pathname,
 	unsigned32     flag,
 	unsigned32     mode
 )DECLARE_BODY
 #else
-#define nfs_open 0
+#define nfs_file_open 0
 #endif
 
+static int nfs_dir_open(
+	rtems_libio_t *iop,
+	const char    *pathname,
+	unsigned32     flag,
+	unsigned32     mode
+)
+{
+NfsNode		node = iop->pathinfo.node_access;
+DirInfo		di;
+
+	/* create a readdirargs object and copy the file handle;
+	 * attach to the file_info.
+	 */
+
+	di = (DirInfo) malloc(sizeof(*di));
+	iop->file_info = di;
+
+	if ( !di  ) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	memcpy( &di->readdirargs.dir,
+			&SERP_FILE(node),
+			sizeof(di->readdirargs.dir) );
+
+	/* rewind cookie */
+	memset( &di->readdirargs.cookie,
+	        0,
+	        sizeof(di->readdirargs.cookie) );
+
+	return 0;
+}
+
 #ifdef DECLARE_BODY
-static int nfs_close(
+static int nfs_file_close(
 	rtems_libio_t *iop
 )DECLARE_BODY
 #else
-#define nfs_close 0
+#define nfs_file_close 0
 #endif
+static int nfs_dir_close(
+	rtems_libio_t *iop
+)
+{
+	free(iop->file_info);
+	iop->file_info = 0;
+	return 0;
+}
 
 #ifdef DECLARE_BODY
-static int nfs_read(
+static int nfs_file_read(
 	rtems_libio_t *iop,
 	void          *buffer,
 	unsigned32     count
 )DECLARE_BODY
 #else
-#define nfs_read 0
+#define nfs_file_read 0
 #endif
 
+/* this is called by readdir() / getdents() */
+static int nfs_dir_read(
+	rtems_libio_t *iop,
+	void          *buffer,
+	unsigned32     count
+)
+{
+int			i;
+DirInfo		*di          = iop->file_info;
+
+	di->buf = buffer;
+	di->len = count;
+	word align + round down the buffer;
+
+	decode();
+
+	if (NFS_OK != di->status) {
+		rtems_set_errno_and_return_minus_one(di->status);
+	}
+
+	return (char*)di->buf - (char*)buffer;
+}
+
 #ifdef DECLARE_BODY
-static int nfs_write(
+static int nfs_file_write(
 	rtems_libio_t *iop,
 	const void    *buffer,
 	unsigned32    count
 )DECLARE_BODY
 #else
-#define nfs_write 0
+#define nfs_file_write 0
+#define nfs_dir_write 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_ioctl(
+static int nfs_file_ioctl(
 	rtems_libio_t *iop,
 	unsigned32     command,
 	void          *buffer
 )DECLARE_BODY
 #else
-#define nfs_ioctl 0
+#define nfs_file_ioctl 0
+#define nfs_dir_ioctl 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_lseek(
+static int nfs_file_lseek(
 	rtems_libio_t *iop,
 	off_t          length,
 	int            whence
 )DECLARE_BODY
 #else
-#define nfs_lseek 0
+#define nfs_file_lseek 0
 #endif
 
-#ifdef DECLARE_BODY
-static int nfs_fstat(
+static int nfs_dir_lseek(
+	rtems_libio_t *iop,
+	off_t          length,
+	int            whence
+)
+{
+DirInfo *di = iop->file_info;
+
+	if (SEEK_SET != whence || 0 != length)
+		return -1;
+
+	/* rewind cookie */
+	memset( &di->readdirargs.cookie,
+	        0,
+	        sizeof(di->readdirargs.cookie) );
+	return 0;
+
+}
+
+#if 0
+struct fattr {
+		ftype type;
+		u_int mode;
+		u_int nlink;
+		u_int uid;
+		u_int gid;
+		u_int size;
+		u_int blocksize;
+		u_int rdev;
+		u_int blocks;
+		u_int fsid;
+		u_int fileid;
+		nfstime atime;
+		nfstime mtime;
+		nfstime ctime;
+};
+
+struct  stat
+{
+		dev_t     st_dev;
+		ino_t     st_ino;
+		mode_t    st_mode;
+		nlink_t   st_nlink;
+		uid_t     st_uid;
+		gid_t     st_gid;
+		dev_t     st_rdev;
+		off_t     st_size;
+		/* SysV/sco doesn't have the rest... But Solaris, eabi does.  */
+#if defined(__svr4__) && !defined(__PPC__) && !defined(__sun__)
+		time_t    st_atime;
+		time_t    st_mtime;
+		time_t    st_ctime;
+#else
+		time_t    st_atime;
+		long      st_spare1;
+		time_t    st_mtime;
+		long      st_spare2;
+		time_t    st_ctime;
+		long      st_spare3;
+		long      st_blksize;
+		long      st_blocks;
+		long  st_spare4[2];
+#endif
+};
+#endif
+
+static int nfs_dir_fstat(
 	rtems_filesystem_location_info_t *loc,
 	struct stat                      *buf
-)DECLARE_BODY
-#else
-#define nfs_fstat 0
-#endif
+)
+{
+fattr *fa = &SERP_ATTR((NfsNode)loc->node_access);
+
+	memset(buf, 0, sizeof(*buf));
+
+	/* translate */
+	buf->st_mode	= fa->mode;
+	buf->st_nlink	= fa->nlink;
+	buf->st_uid		= fa->uid;
+	buf->st_gid		= fa->gid;
+	buf->st_size	= fa->size;
+	/* TODO: set to "preferred size" of this NFS client implementation */
+	buf->st_blksize	= fa->blocksize;
+	buf->st_rdev	= fa->rdev;
+	buf->st_blocks	= fa->blocks;
+	/* TODO: what's this one??:  u_int fsid; */
+	buf->st_ino     = fa->fileid;
+	buf->st_atime	= fa->atime.seconds;
+	buf->st_mtime	= fa->mtime.seconds;
+	buf->st_ctime	= fa->ctime.seconds;
+
+fprintf(stderr,"TSILL: initial mode is 0x%x 0%o\n",fa->mode, fa->mode);
+
+	switch(fa->type) {
+		default:
+		case NFNON:
+		case NFBAD:
+				break;
+
+		case NFSOCK: buf->st_mode |= S_IFSOCK; break;
+		case NFFIFO: buf->st_mode |= S_IFIFO;  break;
+		case NFREG : buf->st_mode |= S_IFREG;  break;
+		case NFDIR : buf->st_mode |= S_IFDIR;  break;
+		case NFBLK : buf->st_mode |= S_IFBLK;  break;
+		case NFCHR : buf->st_mode |= S_IFCHR;  break;
+		case NFLNK : buf->st_mode |= S_IFLNK;  break;
+	}
+
+	return 0;
+}
+#define nfs_file_fstat 0
 
 #ifdef DECLARE_BODY
-static int nfs_fchmod(
+static int nfs_file_fchmod(
 	rtems_filesystem_location_info_t *loc,
 	mode_t                            mode
 )DECLARE_BODY
 #else
-#define nfs_fchmod 0
+#define nfs_file_fchmod 0
+#define nfs_dir_fchmod 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_ftruncate(
+static int nfs_file_ftruncate(
 	rtems_libio_t *iop,
 	off_t          length
 )DECLARE_BODY
 #else
-#define nfs_ftruncate 0
+#define nfs_file_ftruncate 0
+#define nfs_dir_ftruncate 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_fpathconf(
+static int nfs_file_fpathconf(
 	rtems_libio_t *iop,
 	int name
 )DECLARE_BODY
 #else
-#define nfs_fpathconf 0
+#define nfs_file_fpathconf 0
+#define nfs_dir_fpathconf 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_fsync(
+static int nfs_file_fsync(
 	rtems_libio_t *iop
 )DECLARE_BODY
 #else
-#define nfs_fsync 0
+#define nfs_file_fsync 0
+#define nfs_dir_fsync 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_fdatasync(
+static int nfs_file_fdatasync(
 	rtems_libio_t *iop
 )DECLARE_BODY
 #else
-#define nfs_fdatasync 0
+#define nfs_file_fdatasync 0
+#define nfs_dir_fdatasync 0
 #endif
 
 #ifdef DECLARE_BODY
-static int nfs_fcntl(
+static int nfs_file_fcntl(
 	int            cmd,
 	rtems_libio_t *iop
 )DECLARE_BODY
 #else
-#define nfs_fcntl 0
+#define nfs_file_fcntl 0
+#define nfs_dir_fcntl 0
 #endif
 
 #ifdef DECLARE_BODY
 /* OPTIONAL; may be NULL */
-static int nfs_rmnod(
+static int nfs_file_rmnod(
 	rtems_filesystem_location_info_t      *pathloc       /* IN */
 )DECLARE_BODY
 #else
-#define nfs_rmnod 0
+#define nfs_file_rmnod 0
+#define nfs_dir_rmnod 0
 #endif
 
 static
-struct _rtems_filesystem_file_handlers_r nfs_file_handlers = {
-		nfs_open,			/* OPTIONAL; may be NULL */
-		nfs_close,			/* OPTIONAL; may be NULL */
-		nfs_read,			/* OPTIONAL; may be NULL */
-		nfs_write,			/* OPTIONAL; may be NULL */
-		nfs_ioctl,			/* OPTIONAL; may be NULL */
-		nfs_lseek,			/* OPTIONAL; may be NULL */
-		nfs_fstat,			/* OPTIONAL; may be NULL */
-		nfs_fchmod,			/* OPTIONAL; may be NULL */
-		nfs_ftruncate,		/* OPTIONAL; may be NULL */
-		nfs_fpathconf,		/* OPTIONAL; may be NULL - UNUSED */
-		nfs_fsync,			/* OPTIONAL; may be NULL */
-		nfs_fdatasync,		/* OPTIONAL; may be NULL */
-		nfs_fcntl,			/* OPTIONAL; may be NULL */
-		nfs_rmnod,			/* OPTIONAL; may be NULL */
+struct _rtems_filesystem_file_handlers_r nfs_file_file_handlers = {
+		nfs_file_open,			/* OPTIONAL; may be NULL */
+		nfs_file_close,			/* OPTIONAL; may be NULL */
+		nfs_file_read,			/* OPTIONAL; may be NULL */
+		nfs_file_write,			/* OPTIONAL; may be NULL */
+		nfs_file_ioctl,			/* OPTIONAL; may be NULL */
+		nfs_file_lseek,			/* OPTIONAL; may be NULL */
+		nfs_file_fstat,			/* OPTIONAL; may be NULL */
+		nfs_file_fchmod,			/* OPTIONAL; may be NULL */
+		nfs_file_ftruncate,		/* OPTIONAL; may be NULL */
+		nfs_file_fpathconf,		/* OPTIONAL; may be NULL - UNUSED */
+		nfs_file_fsync,			/* OPTIONAL; may be NULL */
+		nfs_file_fdatasync,		/* OPTIONAL; may be NULL */
+		nfs_file_fcntl,			/* OPTIONAL; may be NULL */
+		nfs_file_rmnod,			/* OPTIONAL; may be NULL */
 };
 
-
+static
+struct _rtems_filesystem_file_handlers_r nfs_dir_file_handlers = {
+		nfs_dir_open,			/* OPTIONAL; may be NULL */
+		nfs_dir_close,			/* OPTIONAL; may be NULL */
+		nfs_dir_read,			/* OPTIONAL; may be NULL */
+		nfs_dir_write,			/* OPTIONAL; may be NULL */
+		nfs_dir_ioctl,			/* OPTIONAL; may be NULL */
+		nfs_dir_lseek,			/* OPTIONAL; may be NULL */
+		nfs_dir_fstat,			/* OPTIONAL; may be NULL */
+		nfs_dir_fchmod,			/* OPTIONAL; may be NULL */
+		nfs_dir_ftruncate,		/* OPTIONAL; may be NULL */
+		nfs_dir_fpathconf,		/* OPTIONAL; may be NULL - UNUSED */
+		nfs_dir_fsync,			/* OPTIONAL; may be NULL */
+		nfs_dir_fdatasync,		/* OPTIONAL; may be NULL */
+		nfs_dir_fcntl,			/* OPTIONAL; may be NULL */
+		nfs_dir_rmnod,			/* OPTIONAL; may be NULL */
+};
