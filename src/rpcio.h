@@ -5,7 +5,6 @@
 #include <rtems.h>
 #endif
 
-#include <stdlib.h>
 #include <rpc/rpc.h>
 #include <errno.h>
 #include <sys/ioctl.h>

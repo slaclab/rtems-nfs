@@ -27,6 +27,8 @@
 #include <net/if.h>
 #include <net/route.h>
 
+#include "rpcio.h"
+
 struct socket *rtems_bsdnet_fdToSocket(int fd);
 
 /*
@@ -56,16 +58,29 @@ struct sockaddr *sa;
 	return 0;
 }
 
+static void
+dummyproc(caddr_t ext_buf, u_int ext_size)
+{
+}
+
 /*
  * All `transmit' operations end up calling this routine.
  */
 ssize_t
-send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toaddr, int tolen)
+sendto_nocpy (
+		int s,
+		const void *buf, size_t buflen,
+		int flags,
+		const struct sockaddr *toaddr, int tolen,
+		void *closure,
+		void (*freeproc)(caddr_t, u_int),
+		void (*refproc)(caddr_t, u_int)
+)
 {
 	int           error;
 	struct socket *so;
 	int           i;
-	struct mbuf   *to =  0;
+	struct mbuf   *to, *m;
 	int           ret = -1;
 
 	rtems_bsdnet_semaphore_obtain ();
@@ -81,7 +96,36 @@ send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toad
 		return -1;
 	}
 
-	error = sosend (so, to, NULL, mb, NULL, flags);
+	MGETHDR(m, M_WAIT, MT_DATA);
+	m->m_pkthdr.len   = 0;
+	m->m_pkthdr.rcvif =  (struct ifnet *) 0;
+
+	/* if everything fits into one buffer - fine, just copy */
+#if 0
+	if (buflen <= MHLEN) {
+		MH_ALIGN(m, buflen);
+		memcpy( mtod(m,void*), buf, buflen);
+#if DEBUG & DEBUG_VERBOSE
+		fprintf(stderr,"Single MBUF fit\n");
+#endif
+	}
+	else
+#endif
+	{
+		m->m_flags       |= M_EXT;
+		m->m_ext.ext_buf  = closure ? closure : (void*)buf;
+		m->m_ext.ext_size = buflen;
+		/* we _must_ supply non-null procs; otherwise,
+		 * the code assumes it's a mbuf cluster
+		 */
+		m->m_ext.ext_free = freeproc ? freeproc : dummyproc;
+		m->m_ext.ext_ref  = refproc  ? refproc  : dummyproc;
+		m->m_pkthdr.len  += buflen;
+		m->m_len          = buflen;
+		m->m_data		  = (void*)buf;
+	}
+
+	error = sosend (so, to, NULL, m, NULL, flags);
 	if (error) {
 		if (/*auio.uio_resid != len &&*/ (error == EINTR || error == EWOULDBLOCK))
 			error = 0;
@@ -89,7 +133,7 @@ send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toad
 	if (error) 
 		errno = error;
 	else
-		ret = len /*- auio.uio_resid*/;
+		ret = buflen /*- auio.uio_resid*/;
 	if (to)
 		m_freem(to);
 	rtems_bsdnet_semaphore_release ();

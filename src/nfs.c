@@ -13,6 +13,7 @@
 #include <rtems/seterr.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -106,8 +107,6 @@ static struct timeval _nfscalltimeout = { 10, 0 };	/* {secs, us } */
 #define  DIRENT_HEADER_SIZE ( sizeof(struct dirent) - \
 			sizeof( ((struct dirent *)0)->d_name ) )
 
-
-#undef  TSILLDEBUG
 
 /* debugging flags */
 #define DEBUG_COUNT_NODES	(1<<0)
@@ -661,11 +660,6 @@ static struct nfsstats {
 	u_short						fs_ids;
 } nfsGlob = {0/* IMPORTANT */};
 
-
-#ifdef TSILLDEBUG
-NfsNode		 dbgRoot=0;
-RpcUdpServer dbgSrv=0;
-#endif
 
 /* Two pools of RPC transactions;
  * One with small send buffers
@@ -1426,16 +1420,6 @@ RpcUdpServer	server = nfs->server;
 
 	}
 
-#ifdef TSILLDEBUG
-	fprintf(stderr,"pAttr 0x%08x Type %i, ino %i, fsid %i, rdev %i mode 0%o\n",
-					&SERP_ATTR(node),
-					SERP_ATTR(node).type,
-					SERP_ATTR(node).fileid,
-					SERP_ATTR(node).fsid,
-					SERP_ATTR(node).rdev,
-					SERP_ATTR(node).mode);
-#endif
-
 	if (forMake) {
 		/* remember the name - do this _before_ copying
 		 * the name to local storage; the caller expects a
@@ -1847,10 +1831,6 @@ char				*path     = mt_entry->dev;
 		goto cleanup;
 	}
 
-#ifdef TSILLDEBUG
-	dbgSrv = nfsServer;
-#endif
-
 	assert( nfs = nfsCreate(nfsServer) );
 	nfsServer = 0;
 
@@ -1869,9 +1849,6 @@ char				*path     = mt_entry->dev;
 
 	/* looks good so far */
 
-#ifdef TSILLDEBUG
-	dbgRoot = rootNode;
-#endif
 	mt_entry->mt_fs_root.node_access = rootNode;
 
 	rootNode = 0;

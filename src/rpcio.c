@@ -33,11 +33,21 @@
 /* CONFIGURABLE PARAMETERS                                      */
 /****************************************************************/
 
-#define MBUF_RX			/*If defined: use mbuf XDR stream for
-						 * decoding directly out of mbufs
-						 * Otherwise, the regular sendto/recvfrom
-						 * interface will be used involving an
-						 * extra buffer allocation + copy step.
+#define MBUF_RX			/* If defined: use mbuf XDR stream for
+						 *  decoding directly out of mbufs
+						 *  Otherwise, the regular sendto/recvfrom
+						 *  interface will be used involving an
+						 *  extra buffer allocation + copy step.
+						 */
+
+#define MBUF_TX			/* If defined: avoid copying data when
+						 *  sending. Instead, use a wrapper to
+						 *  'sosend()' which will point an MBUF
+						 *  directly to our buffer space.
+						 *  Note that the BSD stack does not copy
+						 *  data when fragmenting packets - it
+						 *  merely uses an mbuf chain pointing
+						 *  into different areas of the data.
 						 */
 
 /* daemon task parameters */
@@ -81,14 +91,17 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 
 /* Debugging Flags                                              */
 
+/* NOTE: defining DEBUG 0 leaves some 'assert()' paranoia checks
+ *       but produces no output
+ */
+
 #define	DEBUG_TRACE_XACT	(1<<0)
 #define DEBUG_EVENTS		(1<<1)
 #define DEBUG_MALLOC		(1<<2)
 #define DEBUG_TIMEOUT		(1<<3)
 
-#define DEBUG				(DEBUG_TIMEOUT)
-#undef  DEBUG
-
+/* USE PARENTESIS WHEN 'or'ing MULTIPLE FLAGS: (DEBUG_XX | DEBUG_YY) */
+#define DEBUG				0
 
 /****************************************************************/
 /* END OF CONFIGURABLE SECTION                                  */
@@ -100,10 +113,16 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #endif
 
 /* prevent rollover of our timers by readjusting the epoch on the fly */
-#if	DEBUG & DEBUG_TIMEOUT
+#if	(DEBUG) & DEBUG_TIMEOUT
 #define RPCIOD_EPOCH_SECS	10
 #else
 #define RPCIOD_EPOCH_SECS	10000
+#endif
+
+#ifdef	DEBUG
+#define ASSERT(arg)			assert(arg)
+#else
+#define ASSERT(arg)			if (arg)
 #endif
 
 #ifdef __rtems
@@ -256,6 +275,9 @@ typedef struct RpcUdpXactRec_ {
 #ifndef MBUF_RX
 		int					ibufsize;	/* size of the ibuf (bytes)                     */
 #endif
+#ifdef  MBUF_TX
+		int					refcnt;		/* mbuf external storage reference count        */
+#endif
 		int					obufsize;	/* size of the obuf (bytes)                     */
 		RxBuf				ibuf;		/* pointer to input buffer assigned by daemon   */
 		RpcBufU				obuf;       /* output buffer (encoded args) APPENDED HERE   */
@@ -287,6 +309,24 @@ sockRcv(void);
 static void
 rpcio_daemon(rtems_task_argument);
 
+#ifdef MBUF_TX
+ssize_t
+sendto_nocpy (
+		int s,
+		const void *buf, size_t buflen,
+		int flags,
+		const struct sockaddr *toaddr, int tolen,
+		void *closure,
+		void (*freeproc)(caddr_t, u_int),
+		void (*refproc)(caddr_t, u_int)
+);
+static void paranoia_free(caddr_t closure, u_int size);
+static void paranoia_ref (caddr_t closure, u_int size);
+#define SENDTO	sendto_nocpy
+#else
+#define SENDTO	sendto
+#endif
+
 static int				ourSock = -1;	/* the socket we are using for communication */
 #ifdef __rtems
 static rtems_id			rpciod  = 0;	/* task id of the RPC daemon                 */
@@ -302,7 +342,7 @@ static rtems_interval	ticksPerSec;	/* cached system clock rate (WHO IS ASSUMED N
 										 */
 #endif
 
-#if DEBUG & DEBUG_MALLOC
+#if (DEBUG) & DEBUG_MALLOC
 /* malloc wrappers for debugging */
 static int nibufs = 0;
 
@@ -319,6 +359,20 @@ static inline void *MALLOC(int s)
 	return 0;
 }
 
+static inline void *CALLOC(int n, int s)
+{
+	if (s) {
+		void *rval;
+		MU_LOCK(hlock);
+		assert(nibufs++ < 2000);
+		MU_UNLOCK(hlock);
+		assert(rval = calloc(n,s));
+		return rval;
+	}
+	return 0;
+}
+
+
 static inline void FREE(void *p)
 {
 	if (p) {
@@ -330,6 +384,7 @@ static inline void FREE(void *p)
 }
 #else
 #define MALLOC	malloc
+#define CALLOC  calloc
 #define FREE	free
 #endif
 
@@ -505,7 +560,7 @@ register int	i,j;
 	/* word align */
 	size = (size + 3) & ~3;
 
-	rval = (RpcUdpXact)calloc(1,sizeof(*rval) - sizeof(rval->obuf) + size);
+	rval = (RpcUdpXact)CALLOC(1,sizeof(*rval) - sizeof(rval->obuf) + size);
 
 	if (rval) {
 	
@@ -534,7 +589,7 @@ register int	i,j;
 			do {
 				i=(i+1) & XACT_HASH_MSK; /* cheap modulo */
 				if (!xactHashTbl[i]) {
-#if DEBUG & DEBUG_TRACE_XACT
+#if (DEBUG) & DEBUG_TRACE_XACT
 					fprintf(stderr,"RPCIO: entering index %i, val %x\n",i,rval);
 #endif
 					xactHashTbl[i]=rval;
@@ -563,11 +618,11 @@ rpcUdpXactDestroy(RpcUdpXact xact)
 {
 int i = xact->obuf.xid & XACT_HASH_MSK;
 
-#if DEBUG & DEBUG_TRACE_XACT
+#if (DEBUG) & DEBUG_TRACE_XACT
 		fprintf(stderr,"RPCIO: removing index %i, val %x\n",i,xact);
 #endif
 
-		assert(xactHashTbl[i]==xact);
+		ASSERT( xactHashTbl[i]==xact );
 
 		MU_LOCK(hlock);
 		xactHashTbl[i]=0;
@@ -609,7 +664,7 @@ va_list			ap;
 
 #ifdef __rtems
 	xact->lifetime  = ms * ticksPerSec / 1000;
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 {
 	static int once=0;
 	if (!once++) {
@@ -652,7 +707,7 @@ va_list			ap;
 		return RPC_CANTSEND;
 	}
 	/* wakeup the rpciod */
-	assert( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
+	ASSERT( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
 #endif
 
 	return RPC_SUCCESS;
@@ -680,7 +735,7 @@ rtems_event_set		gotEvents;
 
 #ifdef __rtems
 	/* block for the reply */
-	assert( RTEMS_SUCCESSFUL ==
+	ASSERT( RTEMS_SUCCESSFUL ==
 			rtems_event_receive(
 					RTEMS_RPC_EVENT,
 					RTEMS_WAIT | RTEMS_EVENT_ANY,
@@ -690,7 +745,7 @@ rtems_event_set		gotEvents;
 	if (xact->status.re_status) {
 #ifdef MBUF_RX
 		/* add paranoia */
-		assert( !xact->ibuf );
+		ASSERT( !xact->ibuf );
 #endif
 		return xact->status.re_status;
 	}
@@ -748,7 +803,7 @@ rtems_event_set		gotEvents;
 		}
 		/* wakeup the rpciod */
 		fprintf(stderr,"INFO: refreshing my AUTH\n");
-		assert( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
+		ASSERT( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
 	}
 #endif
 
@@ -1032,14 +1087,14 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 						RTEMS_WAIT | RTEMS_EVENT_ANY, 
 						next_retrans,
 						&events)) ) {
-			assert( RTEMS_TIMEOUT == stat );
+			ASSERT( RTEMS_TIMEOUT == stat );
 			events = 0;
 		}
 
 		if (events & RPCIOD_KILL_EVENT) {
 			int i;
 
-#if DEBUG & DEBUG_EVENTS
+#if (DEBUG) & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got KILL event\n");
 #endif
 
@@ -1065,9 +1120,9 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 			}
 		}
 
-		rtems_clock_get(
-				RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
-				&unow);
+		ASSERT( rtems_clock_get(
+						RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
+						&unow ) );
 
 		/* measure everything relative to then to protect against
 		 * rollover
@@ -1083,7 +1138,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 		if (RPCIOD_RX_EVENT & events) {
 
-#if DEBUG & DEBUG_EVENTS
+#if (DEBUG) & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got RX event\n");
 #endif
 
@@ -1111,7 +1166,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 					register TimeoutT rtry = srv->retry_period;
 					register TimeoutT trip = xact->trip;
 
-					assert( trip >= 0 );
+					ASSERT( trip >= 0 );
 
 					if ( 0==trip )
 						trip = 1;
@@ -1132,7 +1187,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 		if (RPCIOD_TX_EVENT & events) {
 
-#if DEBUG & DEBUG_EVENTS
+#if (DEBUG) & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got TX event\n");
 #endif
 
@@ -1167,11 +1222,11 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 					xact->status.re_errno  = ETIMEDOUT;
 					xact->status.re_status = RPC_TIMEDOUT;
 
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 					fprintf(stderr,"XACT timed out; waking up requestor\n");
 #endif
 
-					assert( RTEMS_SUCCESSFUL ==
+					ASSERT( RTEMS_SUCCESSFUL ==
 							rtems_event_send(xact->requestor, RTEMS_RPC_EVENT) );
 
 				} else {
@@ -1179,19 +1234,28 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 					len = (int)XDR_GETPOS(&xact->xdrs);
 				
-					if ( len != sendto( ourSock,
+#ifdef MBUF_TX
+					xact->refcnt = 1;	/* sendto itself */
+#endif
+					if ( len != SENDTO( ourSock,
 										xact->obuf.buf,
 										len,
 										0,
 										(struct sockaddr*) &srv->addr,
-										sizeof(srv->addr)) ) {
+										sizeof(srv->addr)
+#ifdef MBUF_TX
+										, xact,
+										paranoia_free,
+										paranoia_ref
+#endif
+										) ) {
 
 						xact->status.re_errno  = errno;
 						xact->status.re_status = RPC_CANTSEND;
 
 						/* wakeup requestor */
 						fprintf(stderr,"RPCIO: SEND failure\n");
-						assert( RTEMS_SUCCESSFUL ==
+						ASSERT( RTEMS_SUCCESSFUL ==
 									rtems_event_send(xact->requestor, RTEMS_RPC_EVENT) );
 
 					} else {
@@ -1199,7 +1263,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 						 * and enqueue to temporary list
 						 */
 						if (FIRST_ATTEMPT != xact->trip) {
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 							fprintf(stderr,
 								"timed out; tolive is %i (ticks), retry period is %i (ticks)\n",
 									xact->tolive,
@@ -1220,7 +1284,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 								 */
 
 								srv->retry_period<<=1;
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 								fprintf(stderr,
 										"adjusted to; retry period %i\n",
 										srv->retry_period);
@@ -1244,7 +1308,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 						/* enqueue to the list of newly sent transactions */
 						xact->node.next = newList;
 						newList         = &xact->node;
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 						fprintf(stderr,
 								"XACT (0x%08x) age is 0x%x, now: 0x%x\n",
 								xact,
@@ -1282,7 +1346,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 				 */
 				((RpcUdpXact)n)->age  -= now;
 				((RpcUdpXact)n)->trip -= now;
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 				fprintf(stderr,
 						"readjusted XACT (0x%08x); age is 0x%x, trip: 0x%x now: 0x%x\n",
 						(RpcUdpXact)n,
@@ -1297,7 +1361,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 		next_retrans = listHead.next ?
 							((RpcUdpXact)listHead.next)->age - now :
 							epoch;	/* make sure we don't miss updating the epoch */
-#if DEBUG & DEBUG_TIMEOUT
+#if (DEBUG) & DEBUG_TIMEOUT
 		fprintf(stderr,"RPCIO: next timeout is %x\n",next_retrans);
 #endif
 	}
@@ -1380,7 +1444,7 @@ rpcUdpXactPoolCreate(
 int				i;
 RpcUdpXactPool	rval = MALLOC(sizeof(*rval));
 
-	assert( rval &&
+	ASSERT( rval &&
 			RTEMS_SUCCESSFUL == rtems_message_queue_create(
 									rtems_build_name('R','P','C','p'),
 									poolsize,
@@ -1437,7 +1501,7 @@ void
 rpcUdpXactPoolPut(RpcUdpXact xact)
 {
 RpcUdpXactPool pool;
-	assert( pool=xact->pool );
+	ASSERT( pool=xact->pool );
 	if (RTEMS_SUCCESSFUL != rtems_message_queue_send(
 								pool->box,
 								&xact,
@@ -1466,6 +1530,29 @@ bufFree(struct mbuf **m)
 		rtems_bsdnet_semaphore_release();
 		*m = 0;
 	}
+}
+#endif
+
+#ifdef MBUF_TX
+static void
+paranoia_free(caddr_t closure, u_int size)
+{
+#if (DEBUG)
+RpcUdpXact xact = (RpcUdpXact)closure;
+int        len  = (int)XDR_GETPOS(&xact->xdrs);
+	ASSERT( 0 == -- xact->refcnt && size == len );
+#endif
+}
+
+static void
+paranoia_ref (caddr_t closure, u_int size)
+{
+#if (DEBUG)
+RpcUdpXact xact = (RpcUdpXact)closure;
+int        len  = (int)XDR_GETPOS(&xact->xdrs);
+	ASSERT( size == len );
+	xact->refcnt++;
+#endif
 }
 #endif
 
@@ -1515,8 +1602,10 @@ RpcUdpXact			xact     = 0;
 				    (struct sockaddr*)&fromAddr,
 				    &fromLen);
 #else
-	if ( !(ibuf) )
-		assert( ibuf = (RpcBuf)MALLOC(RPCIOD_RXBUFSZ) );
+	if ( !ibuf )
+		ibuf = (RpcBuf)MALLOC(RPCIOD_RXBUFSZ);
+	if ( !ibuf )
+		goto cleanup; /* no memory - drop this message */
 
 	len  = recvfrom(ourSock,
 				    ibuf->buf,
