@@ -7,10 +7,10 @@
 
 # if you have CEXP set this variable to 'YES'
 # and some "help" info will be compiled in.
-HAVE_CEXP=NO
+HAVE_CEXP=YES
 
 # C source names, if any, go here -- minus the .c
-C_PIECES_YES=rpcio nfs sock_mbuf xdr_mbuf dirutils rpcio.modini nfs.modini
+C_PIECES_YES=rpcio nfs sock_mbuf xdr_mbuf dirutils rpcio.modini nfs.modini cexphelp
 C_PIECES_NO=rpcio nfs sock_mbuf xdr_mbuf
 
 C_PIECES=$(C_PIECES_$(HAVE_CEXP))
