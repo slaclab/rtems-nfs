@@ -146,7 +146,7 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define DEBUG_PACKLOSS_FRACT (0xffffffff/10)
 
 /* USE PARENTHESIS WHEN 'or'ing MULTIPLE FLAGS: (DEBUG_XX | DEBUG_YY) */
-#define DEBUG				(DEBUG_PACKLOSS)
+#define DEBUG				(0)
 
 /****************************************************************/
 /* END OF CONFIGURABLE SECTION                                  */
