@@ -68,8 +68,7 @@
 #define DEBUG_READDIR		(1<<3)
 #define DEBUG_SYSCALLS		(1<<4)
 
-#define DEBUG  ( DEBUG_COUNT_NODES | DEBUG_SYSCALLS | DEBUG_EVALPATH )
-#undef  DEBUG
+#define DEBUG  ( DEBUG_COUNT_NODES | DEBUG_EVALPATH )
 
 #ifdef DEBUG
 #define STATIC
@@ -156,6 +155,20 @@ rtems_interrupt_level		l;
 #endif
 	return rval;
 }
+
+/* Forward declarations */
+static int nfs_do_eval_link(
+	rtems_filesystem_location_info_t *pathloc,
+	void                              *arg,
+	int								  forMake
+);
+
+static int evaluate_path(
+	const char *					 path,
+	int								 flags, 
+	rtems_filesystem_location_info_t *pathloc,
+	int								 follow_link
+);
 
 typedef struct DirInfoRec_ {
 	readdirargs	readdirargs;
@@ -582,6 +595,10 @@ struct rtems_filesystem_location_info_tt
 #endif
 
 
+/* NOTE: the calling code assumes that errno is set to
+ *       a nonzero value if this routine returns an error
+ *       (nonzero return value).
+ */
 int
 nfscallSmall(
 	RpcUdpServer	srvr,
@@ -794,12 +811,6 @@ NfsNode r;
 		   SERP_ATTR(r).fsid   == SERP_ATTR(me).fsid;
 }
 
-static int nfs_do_eval_link(
-	rtems_filesystem_location_info_t *pathloc,     /* IN/OUT */
-	void                              *arg,        /* IN     */
-	int								  forMake
-);
-
 STATIC int nfs_do_evalpath(
 	const char                        *pathname,      /* IN     */
 	void                              *arg,
@@ -850,13 +861,15 @@ RpcUdpServer	server = nfs->server;
 			int									rval;
 
 			if (NFLNK == SERP_ATTR(node).type) {
-#if DEBUG & DEBUG_EVALPATH
-				fprintf(stderr,
-						"Following midpath link '%s'\n",
-						part);
-#endif
-				if (nfs_do_eval_link(pathloc, arg, forMake))
+				/* follow midpath link */
+
+				if (nfs_do_eval_link(pathloc, arg, 0 & forMake)) {
+					/* the node pathloc points to has already been
+					 * released by do_eval_link()
+					 */
+					node = 0;
 					goto cleanup;
+				}
 			} else {
 				rtems_filesystem_location_info_t *mp_node;
 #if DEBUG & DEBUG_EVALPATH
@@ -868,10 +881,12 @@ RpcUdpServer	server = nfs->server;
 				nfsNodeDestroy(node);
 
 				*pathloc = *mp_node;
+
 			}
 
 			/* re-append the rest of the path */
 			pathname += (part - p);
+
 			free(p);
 
 #if DEBUG & DEBUG_EVALPATH
@@ -913,6 +928,15 @@ RpcUdpServer	server = nfs->server;
 			e = errno;
 			goto cleanup;
 		}
+
+#if DEBUG & DEBUG_EVALPATH
+		if (NFLNK == SERP_ATTR(node).type && del) {
+			fprintf(stderr,
+					"Following midpath link '%s'\n",
+					part);
+		}
+#endif
+
 	}
 
 #ifdef TSILLDEBUG
@@ -1005,10 +1029,14 @@ cleanup:
 			"leaving evalpath, in use count is %i nodes, %i strings\n",
 			nfs->nodesInUse, nfs->stringsInUse);
 #endif
-	if (e)
+	if (e) {
+#if DEBUG & DEBUG_EVALPATH
+		perror("Evalpath");
+#endif
 		rtems_set_errno_and_return_minus_one(e);
-	else
+	} else {
 		return 0;
+	}
 }
 
 /* MANDATORY; may set errno=ENOSYS and return -1 */
@@ -1520,6 +1548,19 @@ strbuf sbuf;
 	return nfs_do_readlink(loc, &sbuf);
 }
 
+/* The semantics of this routine are:
+ *
+ * The caller submits a valid pathloc, i.e. it has
+ * an NfsNode attached to node_access.
+ * On return, pathloc points to the target node which
+ * may or may not be an NFS node.
+ * Hence, the original NFS node is released in either
+ * case:
+ *   - link evaluation fails; pathloc points to no valid node
+ *   - link evaluation success; pathloc points to a new valid
+ *     node. If it's an NFS node, a new NfsNode will be attached
+ *     to node_access...
+ */
 static int nfs_do_eval_link(
 	rtems_filesystem_location_info_t *pathloc,     /* IN/OUT */
 	void                              *arg,        /* IN     */
@@ -1529,10 +1570,16 @@ static int nfs_do_eval_link(
 int	 								rval;
 strbuf								sbuf;
 rtems_filesystem_location_info_t	locbuf;
+NfsNode								node = pathloc->node_access;
 
 	/* let XDR allocate the proper string length */
 	sbuf.buf = 0;
 	sbuf.max = NFS_MAXPATHLEN;
+
+	/* evaluate path will allocate a new node, hence we must remember
+	 * the current one and free it eventually.
+	 */
+	locbuf = *pathloc;
 
 	/* assume the generics have verified 'pathloc' to be
 	 * a link...
@@ -1540,21 +1587,40 @@ rtems_filesystem_location_info_t	locbuf;
 	if ( nfs_do_readlink(pathloc, &sbuf) ) {
 		rval = -1;
 	} else {
-		/* evaluate path will allocate a new node, hence we must remember
-		 * the current one and free it eventually.
-		 */
-		locbuf = *pathloc;
-		if (forMake) {
-			if ( DELIM == *sbuf.buf )
-				*pathloc = rtems_filesystem_root;
-			rval = pathloc->ops->evalformake_h(sbuf.buf, pathloc, (const char**)arg);
+		char *linkval = sbuf.buf;
+
+#if DEBUG & DEBUG_EVALPATH
+		fprintf(stderr, "link value is '%s'\n", linkval);
+#endif
+
+		if ( DELIM != *linkval ) {
+			/* we must backup to the link's directory */
+			memcpy( &SERP_FILE(node),
+					&node->args.dir,
+					sizeof(node->args.dir) );
+			updateAttr(node);
 		} else {
-			rval = rtems_filesystem_evaluate_path(sbuf.buf, (int)arg, pathloc, 1) ;
+			*pathloc = rtems_filesystem_root;
+			linkval++;
 		}
-		rtems_filesystem_freenode(&locbuf);
+
+		if (forMake) {
+
+			rval = pathloc->ops->evalformake_h(linkval, pathloc, (const char**)arg);
+
+		} else {
+			/* mimic eval.c code; we cannot use rtems_filesystem_evaluate_path()
+			 * here because we don't want the current directory as a start location
+			 * for relative paths but 'pathloc', hence the duplication :-( :-(
+			 */
+			rval = evaluate_path(linkval, (int)arg, pathloc, 1);
+		}
 	}
 
 	xdr_free(xdr_strbuf, (caddr_t)&sbuf);
+
+	rtems_filesystem_freenode(&locbuf);
+
 	return rval;
 }
 
@@ -2113,3 +2179,112 @@ struct _rtems_filesystem_file_handlers_r nfs_dir_file_handlers = {
 		nfs_dir_fcntl,			/* OPTIONAL; may be NULL */
 		nfs_dir_rmnod,				/* OPTIONAL; may be NULL */
 };
+
+
+/* This routine is stolen from RTEMS:
+ *
+ *  rtems_filesystem_evaluate_path()
+ *
+ *  Routine to seed the evaluate path routine.
+ *
+ *  COPYRIGHT (c) 1989-1999.
+ *  On-Line Applications Research Corporation (OAR).
+ *
+ *  The license and distribution terms for this file may be
+ *  found in the file LICENSE in this distribution or at
+ *  http://www.OARcorp.com/rtems/license.html.
+ *
+ *
+ * The difference to the original routine is that
+ * we don't want to set the start location but
+ * use the passed-in 'pathloc' 
+ */
+
+static
+int evaluate_path(
+  const char                        *pathname,
+  int                                flags,
+  rtems_filesystem_location_info_t  *pathloc,
+  int                                follow_link
+)
+{
+#if 0
+  int                           i;
+#endif
+  int                           result;
+  rtems_filesystem_node_types_t type;
+
+  /*
+   * Verify Input parameters.
+   */
+
+  if ( !pathname )
+    rtems_set_errno_and_return_minus_one( EFAULT );
+
+  if ( !pathloc )
+    rtems_set_errno_and_return_minus_one( EIO );       /* should never happen */
+  
+  /*
+   * Evaluate the path using the optable evalpath.
+   */
+
+#if 0
+  rtems_filesystem_get_start_loc( pathname, &i, pathloc );
+#endif
+
+  if ( !pathloc->ops->evalpath_h )
+    rtems_set_errno_and_return_minus_one( ENOTSUP );
+
+#if DEBUG & DEBUG_EVALPATH
+  fprintf(stderr, "eval_path(%s)\n", pathname);
+#endif
+
+#if 0
+  result = (*pathloc->ops->evalpath_h)( &pathname[i], flags, pathloc );
+#else
+  result = (*pathloc->ops->evalpath_h)( pathname, flags, pathloc );
+#endif
+
+
+  /*
+   * Get the Node type and determine if you need to follow the link or
+   * not.
+   */
+
+  if ( (result == 0) && follow_link ) {
+
+    if ( !pathloc->ops->node_type_h ) {
+	  rtems_filesystem_freenode(pathloc);
+      rtems_set_errno_and_return_minus_one( ENOTSUP );
+	}
+
+    type = (*pathloc->ops->node_type_h)( pathloc );
+
+    if ( ( type == RTEMS_FILESYSTEM_HARD_LINK ) ||
+         ( type == RTEMS_FILESYSTEM_SYM_LINK ) ) {
+
+        if ( !pathloc->ops->eval_link_h ) {
+	      rtems_filesystem_freenode(pathloc);
+          rtems_set_errno_and_return_minus_one( ENOTSUP );
+		}
+
+		/* what to do with the valid node pathloc points to
+		 * if eval_link_h() fails?
+		 * Let the FS implementation deal with this case. It
+		 * should probably free pathloc in either case:
+		 *   - if the link evaluation fails, it must free the
+		 *     original (valid) pathloc because we are going
+		 *     to return -1 and hence the FS generics won't
+		 *     cleanup pathloc
+		 *   - if the link evaluation is successful, the updated
+		 *     pathloc will be passed up (and eventually released).
+		 *     Hence, the (valid) original node that we submit to 
+		 *     eval_link_h() should be released by the handler.
+		 */
+         result =  (*pathloc->ops->eval_link_h)( pathloc, flags );
+ 
+    }
+  }
+
+  return result;
+}

@@ -339,14 +339,12 @@ rtems_event_set		gotEvents;
 				reply_xdrs.x_op = XDR_FREE;
 				xdr_opaque_auth(&reply_xdrs, &reply_msg.acpted_rply.ar_verf);
 			}
-			XDR_DESTROY(&reply_xdrs);
-			return RPC_SUCCESS;
 		}
 	} else {
+		reply_xdrs.x_op        = XDR_FREE;
+		xdr_replymsg(&reply_xdrs, &reply_msg);
 		xact->status.re_status = RPC_CANTDECODERES;
 	}
-	reply_xdrs.x_op = XDR_FREE;
-	xdr_replymsg(&reply_xdrs, &reply_msg);
 	XDR_DESTROY(&reply_xdrs);
 
 	free(xact->ibuf);
