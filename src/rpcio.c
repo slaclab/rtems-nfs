@@ -92,7 +92,6 @@ typedef struct RpcUdpXactPoolRec_ {
 } RpcUdpXactPoolRec;
 #endif
 
-
 static RpcUdpXact xactHashTbl[XACT_HASHS]={0};
 
 static int				ourSock = -1;
@@ -105,6 +104,31 @@ static rtems_interval	ticksPerSec;
 
 static void rpcio_daemon(rtems_task_argument);
 #endif
+
+static int nibufs = 0;
+
+static inline void *MALLOC(int s)
+{
+	if (s) {
+		void *rval;
+		HASH_TBL_LOCK();
+		assert(nibufs++ < 2000);
+		HASH_TBL_UNLOCK();
+		assert(rval = malloc(s));
+		return rval;
+	}
+	return 0;
+}
+
+static inline void FREE(void *p)
+{
+	if (p) {
+		HASH_TBL_LOCK();
+		nibufs--;
+		HASH_TBL_UNLOCK();
+		free(p);
+	}
+}
 
 RpcUdpServer
 rpcUdpServerCreate(
@@ -126,7 +150,7 @@ u_short			port;
 			return 0;
 	} 
 
-	rval       			= (RpcUdpServer)malloc(sizeof(*rval));
+	rval       			= (RpcUdpServer)MALLOC(sizeof(*rval));
 	rval->addr 			= *paddr;
 
 	rval->retry_period  = retry_period.tv_usec * ticksPerSec / 1000000;
@@ -143,7 +167,7 @@ rpcUdpServerDestroy(RpcUdpServer s)
 	if (!s)
 		return;
 	auth_destroy(s->auth);
-	free(s);
+	FREE(s);
 }
 
 RpcUdpXact
@@ -173,7 +197,7 @@ register int	i,j;
 		header.rm_call.cb_vers    = version;
 		xdrmem_create(&(rval->xdrs), rval->obuf.buf, size, XDR_ENCODE);
 		if (!xdr_callhdr(&(rval->xdrs), &header)) {
-			free(rval);
+			FREE(rval);
 			return 0;
 		}
 		/* pick a free table slot and initialize the XID */
@@ -204,7 +228,7 @@ register int	i,j;
 		HASH_TBL_UNLOCK();
 		if (i==j) {
 			XDR_DESTROY(&rval->xdrs);
-			free(rval);
+			FREE(rval);
 			return 0;
 		}
 		rval->obuf.xid  = (rval->obuf.xid << LD_XACT_HASH) | i;
@@ -229,10 +253,10 @@ int i = xact->obuf.xid & XACT_HASH_MSK;
 		xactHashTbl[i]=0;
 		HASH_TBL_UNLOCK();
 
-		free(xact->ibuf);
+		FREE(xact->ibuf);
 
 		XDR_DESTROY(&xact->xdrs);
-		free(xact);
+		FREE(xact);
 }
 
 
@@ -347,7 +371,7 @@ rtems_event_set		gotEvents;
 	}
 	XDR_DESTROY(&reply_xdrs);
 
-	free(xact->ibuf);
+	FREE(xact->ibuf);
 	xact->ibuf     = 0;
 	xact->ibufsize = 0;
 
@@ -383,6 +407,7 @@ int					fromLen  = sizeof(fromAddr);
 				   ibuf->buf, ibufsize,
 				   0,
 				   (struct sockaddr*)&fromAddr, &fromLen);
+
 	if (len <= 0) {
 		if (EAGAIN != errno)
 			fprintf(stderr,"RECV failed: %s\n",strerror(errno));
@@ -539,14 +564,16 @@ RpcBuf			buf = 0;
 			sel_err=select(ourSock+1, &rset, 0, 0, &tmp);
 			if (sel_err > 0) {
 				/* OK */
-				if (!buf) buf = (RpcBuf)malloc(UDPMSGSIZE);
+				if (!buf) {
+					buf = (RpcBuf)MALLOC(UDPMSGSIZE);
+				}
 				if ( sockRcv(&buf, UDPMSGSIZE) )
 					return rpcUdpRcv(xact);
 				fprintf(stderr,"Rcv failed '%s'\n",strerror(errno));
 			}
 		} while (xact->retrans--);
 
-		free(buf);
+		FREE(buf);
 
 		return RPC_TIMEDOUT;
 #else
@@ -643,14 +670,17 @@ RpcBuf			 buf = 0;
 			fprintf(stderr,"RPCIO: got RX event\n");
 #endif
 
-			if (!buf)
-				buf=(RpcBuf)malloc(UDPMSGSIZE);
+			if (!buf) {
+				buf=(RpcBuf)MALLOC(UDPMSGSIZE);
+			}
 			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
 				/* extract from the retransmission list */
 				nodeXtract(&xact->node);
 				/* wakeup requestor */
 				xact->status.re_status = RPC_SUCCESS;
 				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+				if (!buf)
+					buf = (RpcBuf)MALLOC(UDPMSGSIZE);
 			}
 		}
 
@@ -771,7 +801,7 @@ RpcBuf			 buf = 0;
 	}
 #endif
 
-	free(buf);
+	FREE(buf);
 
 	rtems_message_queue_delete(q);
 
@@ -813,7 +843,7 @@ rpcUdpXactPoolCreate(
 	int xactsize,	int poolsize)
 {
 int				i;
-RpcUdpXactPool	rval = malloc(sizeof(*rval));
+RpcUdpXactPool	rval = MALLOC(sizeof(*rval));
 
 	assert( rval &&
 			RTEMS_SUCCESSFUL == rtems_message_queue_create(
@@ -837,7 +867,7 @@ RpcUdpXact xact;
 		rpcUdpXactDestroy(xact);
 	}
 	rtems_message_queue_delete(pool->box);
-	free(pool);
+	FREE(pool);
 }
 
 RpcUdpXact
