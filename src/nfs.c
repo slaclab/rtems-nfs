@@ -73,6 +73,7 @@
 #include <cexpHelp.h>
 #endif
 
+
 /* Configurable parameters */
 
 /* Estimated average length of a filename (including terminating 0).
@@ -577,6 +578,12 @@ extern struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
 extern struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
 extern		   rtems_driver_address_table		 drvNfs;
 
+int
+nfsMountsShow(FILE*);
+
+rtems_status_code
+rtems_filesystem_resolve_location(char *buf, int len, rtems_filesystem_location_info_t *loc);
+
 
 /*****************************************
 	Inline Routines
@@ -662,10 +669,13 @@ static int dirres_entry_size;
 
 /* Global stuff and statistics */
 static struct nfsstats {
+		/* A lock for protecting the
+		 * linked ist of mounted NFS
+		 * and the num_mounted_fs field
+		 */
+	rtems_id					llock;
 		/* A lock for protecting misc
-		 * stuff (such as the fields
-		 * of this struct) within the
-		 * driver.
+		 * stuff  within the driver.
 		 * The lock must only be held
 		 * for short periods of time.
 		 */
@@ -731,10 +741,10 @@ Nfs rval = calloc(1,sizeof(*rval));
 
 	if (rval) {
 		rval->server     = server;
-		LOCK(nfsGlob.lock);
+		LOCK(nfsGlob.llock);
 			rval->next 		   = nfsGlob.mounted_fs;
 			nfsGlob.mounted_fs = rval;
-		UNLOCK(nfsGlob.lock);
+		UNLOCK(nfsGlob.llock);
 	} else {
 		errno = ENOMEM;
 	}
@@ -751,7 +761,7 @@ register Nfs prev;
 	if (!nfs)
 		return;
 
-	LOCK(nfsGlob.lock);
+	LOCK(nfsGlob.llock);
 		if (nfs == nfsGlob.mounted_fs)
 			nfsGlob.mounted_fs = nfs->next;
 		else {
@@ -762,7 +772,7 @@ register Nfs prev;
 			assert( prev );
 			prev->next = nfs->next;
 		}
-	UNLOCK(nfsGlob.lock);
+	UNLOCK(nfsGlob.llock);
 
 	nfs->next = 0; /* paranoia */
 	rpcUdpServerDestroy(nfs->server);
@@ -946,7 +956,14 @@ entry	dummy;
 							bigPoolDepth) );
 
 	assert( RTEMS_SUCCESSFUL == rtems_semaphore_create(
-							rtems_build_name('N','F','S','s'),
+							rtems_build_name('N','F','S','l'),
+							1,
+							MUTEX_ATTRIBUTES,
+							0,
+							&nfsGlob.llock) );
+
+	assert( RTEMS_SUCCESSFUL == rtems_semaphore_create(
+							rtems_build_name('N','F','S','m'),
 							1,
 							MUTEX_ATTRIBUTES,
 							0,
@@ -968,35 +985,36 @@ nfsCleanup(void)
 {
 rtems_id	l;
 int			refuse;
-Nfs			nfs;
 
-	if (!nfsGlob.lock) {
+	if (!nfsGlob.llock) {
 		/* registering the driver failed - let them still cleanup */
 		return 0;
 	}
 
-	LOCK(nfsGlob.lock);
+	LOCK(nfsGlob.llock);
 	if ( (refuse = nfsGlob.num_mounted_fs) ) {
-		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted:\n",
+		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted.\n",
 						refuse);
-		for (nfs = nfsGlob.mounted_fs; nfs; nfs=nfs->next)
-			fprintf(stderr,"%s\n",nfs->mt_entry->dev);
+		nfsMountsShow(stderr);
 		/* yes, printing is slow - but since you try to unload the driver,
 		 * you assume nobody is using NFS, so what if they have to wait?
 		 */
-		UNLOCK(nfsGlob.lock);
+		UNLOCK(nfsGlob.llock);
 		return -1;
 	}
+
+	rtems_semaphore_delete(nfsGlob.lock);
+	nfsGlob.lock = 0;
 
 	/* hold the lock while cleaning up... */
 
 	rpcUdpXactPoolDestroy(smallPool);
 	rpcUdpXactPoolDestroy(bigPool);
-	l = nfsGlob.lock;
+	l = nfsGlob.llock;
 	rtems_io_unregister_driver(nfsGlob.nfs_major);
 
 	rtems_semaphore_delete(l);
-	nfsGlob.lock = 0;
+	nfsGlob.llock = 0;
 	return 0;
 }
 
@@ -1911,11 +1929,11 @@ char				*path     = mt_entry->dev;
 	mt_entry->mt_fs_root.handlers	 = &nfs_dir_file_handlers;
 	mt_entry->pathconf_limits_and_options = nfs_limits_and_options;
 
-	LOCK(nfsGlob.lock);
+	LOCK(nfsGlob.llock);
 		nfsGlob.num_mounted_fs++;
 		/* allocate a new ID for this FS */
 		nfs->id = nfsGlob.fs_ids++;
-	UNLOCK(nfsGlob.lock);
+	UNLOCK(nfsGlob.llock);
 
 	mt_entry->fs_info				 = nfs;
 	nfs->mt_entry					 = mt_entry;
@@ -1980,9 +1998,9 @@ u_long				uid,gid;
 	nfsDestroy(mt_entry->fs_info);
 	mt_entry->fs_info = 0;
 
-	LOCK(nfsGlob.lock);
+	LOCK(nfsGlob.llock);
 		nfsGlob.num_mounted_fs--;
-	UNLOCK(nfsGlob.lock);
+	UNLOCK(nfsGlob.llock);
 
 	return 0;
 }
@@ -3049,6 +3067,39 @@ static rtems_driver_address_table	drvNfs = {
 		0					/* control */
 };
 
+/* Dump a list of the currently mounted NFS to a  file */
+int
+nfsMountsShow(FILE *f)
+{
+char	*mntpt = 0;
+Nfs		nfs;
+
+	if (!f)
+		f = stdout;
+
+	if ( !(mntpt=malloc(MAXPATHLEN)) ) {
+		fprintf(stderr,"nfsMountsShow(): no memory\n");
+		return -1;
+	}
+	
+	fprintf(f,"Currently Mounted NFS:\n");
+
+	LOCK(nfsGlob.llock);
+
+	for (nfs = nfsGlob.mounted_fs; nfs; nfs=nfs->next) {
+		fprintf(f,"%s on ", nfs->mt_entry->dev);
+		if (rtems_filesystem_resolve_location(mntpt, MAXPATHLEN, &nfs->mt_entry->mt_fs_root))
+			fprintf(f,"<UNABLE TO LOOKUP MOUNTPOINT>\n");
+		else
+			fprintf(f,"%s\n",mntpt);
+	}
+
+	UNLOCK(nfsGlob.lock);
+
+	free(mntpt);
+	return 0;
+}
+
 /* convenience wrapper
  *
  * NOTE: this routine calls NON-REENTRANT
@@ -3067,6 +3118,7 @@ char									*dev =  0;
 
 	if (!uidhost || !path || !mntpoint) {
 		fprintf(stderr,"usage: nfsMount(""[uid.gid@]host"",""path"",""mountpoint"")\n");
+		nfsMountsShow(stderr);
 		return -1;
 	}
 
@@ -3144,4 +3196,112 @@ char									*dev =  0;
 cleanup:
 	free(dev);
 	return rval;
+}
+
+/* HERE COMES A REALLY UGLY HACK */
+
+/* This is stupid; it is _very_ hard to find the path
+ * leading to a rtems_filesystem_location_info_t node :-(
+ * The only easy way is making the location the current
+ * directory and issue a getcwd().
+ * However, since we don't want to tamper with the
+ * current directory, we must create a separate
+ * task to do the job for us - sigh.
+ */
+
+typedef struct ResolvePathArgRec_ {
+	rtems_filesystem_location_info_t	*loc;	/* IN: location to resolve	*/
+	char								*buf;	/* IN/OUT: buffer where to put the path */
+	int									len;	/* IN: buffer length		*/
+	rtems_id							sync;	/* IN: synchronization		*/
+	rtems_status_code					status; /* OUT: result				*/
+} ResolvePathArgRec, *ResolvePathArg;
+
+static void
+resolve_path(rtems_task_argument arg)
+{
+ResolvePathArg						rpa = (ResolvePathArg)arg;
+rtems_filesystem_location_info_t	old;
+
+	/* IMPORTANT: let the helper task have its own libio environment (i.e. cwd) */
+	if (RTEMS_SUCCESSFUL == (rpa->status = rtems_libio_set_private_env())) {
+
+		old = rtems_filesystem_current;
+
+		rtems_filesystem_current = *(rpa->loc);
+
+		if ( !getcwd(rpa->buf, rpa->len) )
+			rpa->status = RTEMS_UNSATISFIED;
+
+		/* must restore the cwd because 'freenode' will be called on it */
+		rtems_filesystem_current = old;
+	}
+	rtems_semaphore_release(rpa->sync);
+	rtems_task_delete(RTEMS_SELF);
+}
+
+
+/* a utility routine to find the path leading to a
+ * rtems_filesystem_location_info_t node
+ *
+ * INPUT: 'loc' and a buffer 'buf' (length 'len') to hold the
+ *        path.
+ * OUTPUT: path copied into 'buf'
+ *
+ * RETURNS: 0 on success, RTEMS error code on error.
+ */
+rtems_status_code
+rtems_filesystem_resolve_location(char *buf, int len, rtems_filesystem_location_info_t *loc)
+{
+ResolvePathArgRec	arg;
+rtems_id			tid = 0;
+rtems_task_priority	pri;
+rtems_status_code	status;
+
+	arg.loc  = loc;
+	arg.buf  = buf;
+	arg.len  = len;
+	arg.sync = 0;
+
+	status = rtems_semaphore_create(
+					rtems_build_name('r','e','s','s'),
+					0,
+					RTEMS_SIMPLE_BINARY_SEMAPHORE,
+					0,
+					&arg.sync);
+
+	if (RTEMS_SUCCESSFUL != status)
+		goto cleanup;
+
+	rtems_task_set_priority(RTEMS_SELF, RTEMS_CURRENT_PRIORITY, &pri);
+
+	status = rtems_task_create(
+					rtems_build_name('r','e','s','s'),
+					pri,
+					RTEMS_MINIMUM_STACK_SIZE + 50000,
+					RTEMS_DEFAULT_MODES,
+					RTEMS_DEFAULT_ATTRIBUTES,
+					&tid);
+
+	if (RTEMS_SUCCESSFUL != status)
+		goto cleanup;
+
+	status = rtems_task_start(tid, resolve_path, (rtems_task_argument)&arg);
+
+	if (RTEMS_SUCCESSFUL != status) {
+		rtems_task_delete(tid);
+		goto cleanup;
+	}
+
+
+	/* synchronize with the helper task */
+	rtems_semaphore_obtain(arg.sync, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+
+	status = arg.status;
+
+cleanup:
+	if (arg.sync)
+		rtems_semaphore_delete(arg.sync);
+
+	return status;
 }

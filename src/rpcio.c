@@ -227,11 +227,12 @@ typedef struct ListNodeRec_ {
 
 /* Structure representing an RPC server */
 typedef struct RpcUdpServerRec_ {
+		RpcUdpServer		next;			/* linked list of all servers; protected by hlock */
 		struct sockaddr_in	addr;
 		AUTH				*auth;
 		rtems_id			authlock;		/* must MUTEX the auth object - it's not clear
 											 *  what is better:
-											 *    1 having one (MUTEXed) auth per server
+											 *   1 having one (MUTEXed) auth per server
 											 *	   who is shared among all transactions
 											 *	   using that server
 											 *	 2 maintaining an AUTH per transaction
@@ -245,8 +246,12 @@ typedef struct RpcUdpServerRec_ {
 		TimeoutT			retry_period;	/* dynamically adjusted retry period
 											 * (based on packet roundtrip time)
 											 */
-		unsigned long		retrans;		/* how many retries were issued by this server */
-		char				name[20];		/* server's address in IP 'dot' notation       */
+		/* STATISTICS */
+		unsigned long		retrans;		/* how many retries were issued by this server         */
+		unsigned long		requests;		/* how many requests have been sent                    */
+		unsigned long       timeouts;		/* how many requests have timed out                    */
+		unsigned long       errors;         /* how many errors have occurred (other than timeouts) */
+		char				name[20];		/* server's address in IP 'dot' notation               */
 } RpcUdpServerRec;
 
 typedef union  RpcBufU_ {
@@ -344,18 +349,21 @@ static void paranoia_ref (caddr_t closure, u_int size);
 #define SENDTO	sendto
 #endif
 
-static int				ourSock = -1;	/* the socket we are using for communication */
-static rtems_id			rpciod  = 0;	/* task id of the RPC daemon                 */
-static rtems_id			msgQ    = 0;	/* message queue where the daemon picks up
-										 * requests
-										 */
-static rtems_id			hlock	= 0;	/* MUTEX protecting the hash table           */
-static rtems_id			fini	= 0;	/* a synchronization semaphore we use during
-										 * module cleanup / driver unloading
-										 */
-static rtems_interval	ticksPerSec;	/* cached system clock rate (WHO IS ASSUMED NOT
-										 * TO CHANGE)
-										 */
+static RpcUdpServer		rpcUdpServers = 0;	/* linked list of all servers; protected by llock */
+
+static int				ourSock = -1;		/* the socket we are using for communication */
+static rtems_id			rpciod  = 0;		/* task id of the RPC daemon                 */
+static rtems_id			msgQ    = 0;		/* message queue where the daemon picks up
+											 * requests
+											 */
+static rtems_id			llock	= 0;		/* MUTEX protecting the server list */
+static rtems_id			hlock	= 0;		/* MUTEX protecting the hash table and the list of servers */
+static rtems_id			fini	= 0;		/* a synchronization semaphore we use during
+											 * module cleanup / driver unloading
+											 */
+static rtems_interval	ticksPerSec;		/* cached system clock rate (WHO IS ASSUMED NOT
+											 * TO CHANGE)
+											 */
 #if (DEBUG) & DEBUG_MALLOC
 /* malloc wrappers for debugging */
 static int nibufs = 0;
@@ -540,6 +548,12 @@ struct pmap		pmaparg;
 
 	MU_CREAT( &rval->authlock );
 
+	/* link into list */
+	MU_LOCK( llock );
+	rval->next = rpcUdpServers;
+	rpcUdpServers = rval;
+	MU_UNLOCK( llock );
+
 	*psrv				= rval;
 	return RPC_SUCCESS;
 }
@@ -547,15 +561,60 @@ struct pmap		pmaparg;
 void
 rpcUdpServerDestroy(RpcUdpServer s)
 {
+RpcUdpServer prev;
 	if (!s)
 		return;
 	/* we should probably verify (but how?) that nobody
 	 * (at least: no outstanding XACTs) is using this
+	 * server;
 	 */
+
+	/* remove from server list */
+	MU_LOCK(llock);
+	prev = rpcUdpServers;
+	if ( s == prev ) {
+		rpcUdpServers = s->next;
+	} else {
+		for ( ; prev ; prev = prev->next) {
+			if (prev->next == s) {
+				prev->next = s->next;
+				break;
+			}
+		}
+	}
+	MU_UNLOCK(llock);
+
+	/* MUST have found it */
+	assert(prev);
+
 	MU_LOCK(s->authlock);
 	auth_destroy(s->auth);
 	MU_DESTROY(s->authlock);
 	MY_FREE(s);
+}
+
+int
+rpcUdpStats(FILE *f)
+{
+RpcUdpServer s;
+
+	if (!f) f = stdout;
+
+	fprintf(f,"RPCIOD statistics:\n");
+
+	MU_LOCK(llock);
+	for (s = rpcUdpServers; s; s=s->next) {
+		fprintf(f,"\nServer -- %s:\n", s->name);
+		fprintf(f,"  requests    sent: %10ld, retransmitted: %10ld\n",
+						s->requests, s->retrans);
+		fprintf(f,"         timed out: %10ld,   send errors: %10ld\n",
+						s->timeouts, s->errors);
+		fprintf(f,"  current retransmission interval: %dms\n",
+						s->retry_period * 1000 / ticksPerSec );
+	}
+	MU_UNLOCK(llock);
+
+	return 0;
 }
 
 RpcUdpXact
@@ -840,6 +899,7 @@ struct sockwakeup	wkup;
 											RTEMS_CLOCK_GET_TICKS_PER_SECOND,
 											&ticksPerSec));
 			MU_CREAT( &hlock );
+			MU_CREAT( &llock );
 
 			assert( RTEMS_SUCCESSFUL == rtems_task_create(
 											rtems_build_name('R','P','C','d'),
@@ -1187,6 +1247,8 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 					xact->status.re_errno  = ETIMEDOUT;
 					xact->status.re_status = RPC_TIMEDOUT;
 
+					srv->timeouts++;
+
 #if (DEBUG) & DEBUG_TIMEOUT
 					fprintf(stderr,"XACT timed out; waking up requestor\n");
 #endif
@@ -1217,6 +1279,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 						xact->status.re_errno  = errno;
 						xact->status.re_status = RPC_CANTSEND;
+						srv->errors++;
 
 						/* wakeup requestor */
 						fprintf(stderr,"RPCIO: SEND failure\n");
@@ -1266,6 +1329,8 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 										srv->retrans,
 										srv->name);
 							}
+						} else {
+							srv->requests++;
 						}
 						xact->trip      = now;
 						xact->age       = now + srv->retry_period;
@@ -1587,6 +1652,7 @@ RpcUdpXact			xact     = 0;
 #ifndef DEBUG
 			/* don't complain if it's just a late arrival of a retry */
 			  && xact->obuf.xid               != xid + XACT_HASHS
+			  && xact->obuf.xid               != xid + 2*XACT_HASHS
 #endif
 		   )                                                                ||
 		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||

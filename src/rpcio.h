@@ -81,6 +81,12 @@ rpcUdpServerCreate(
 void
 rpcUdpServerDestroy(RpcUdpServer s);
 
+/* Dump statistics to a file (stdout if NULL);
+ * returns 0 for convenience
+ */
+int
+rpcUdpStats(FILE *f);
+
 enum clnt_stat
 rpcUdpClntCreate(
 	struct sockaddr_in	*psaddr,

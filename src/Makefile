@@ -34,7 +34,7 @@ SRCS=$(C_FILES) $(CC_FILES) $(H_FILES) $(S_FILES)
 OBJS=$(C_O_FILES) $(CC_O_FILES) $(S_O_FILES)
 
 PGMS=${ARCH}/nfs.obj ${ARCH}/rpcio.obj ${ARCH}/dirutils.obj 
-LIBOBJS=$(ARCH)/nfs.obj $(ARCH)/rpcio.obj
+LIBOBJS=$(ARCH)/nfs.o $(ARCH)/rpcio.o
 
 LIBNAME=librtemsNfs.a
 
