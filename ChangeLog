@@ -1,5 +1,7 @@
 Changes since RTEMS-NFS 1.3.beta
  NFS:
+ - nfs_read_dir() must reset the 'eofreached' flag if it skipped
+   dirents present in the xdr but not fitting into the user buffer.
  - nfsMountsShow() released the wrong lock!
  RPCIO:
  - Relaxed paranoia check / ASSERTion failure:
