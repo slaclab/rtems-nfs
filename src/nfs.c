@@ -1265,8 +1265,8 @@ enum clnt_stat		stat = RPC_FAILED;
 #endif
 		stat  = rpcUdpCallRp(
 						psrvr,
-						MOUNT_PROGRAM,
-						MOUNT_V1,
+						MOUNTPROG,
+						MOUNTVERS,
 						proc,
 						xargs,
 						pargs,
