@@ -19,9 +19,6 @@
 #include <netdb.h>
 
 
-#define  DIRENT_HEADER_SIZE ( sizeof(struct dirent) - \
-			sizeof( ((struct dirent *)0)->d_name ) )
-
 #include <nfs_prot.h>
 #include <mount_prot.h>
 
@@ -67,24 +64,53 @@ static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
 #define UPDIR							".."
 #define NFS_VERSION_2					NFS_VERSION
 
+/* we use a dynamically assigned major number */
+#define NFS_MAJOR						(nfsGlob.nfs_major)
 
-/* NOTE: RTEMS uses short st_ino :-(. Therefore, we merge the
- * upper 16bit of the fileid into the device no. This has an impact
- * on performance, as e.g. getcwd() stats() all directory entries
- * when it believes it has crossed a mount point (a.st_dev != b.st_dev)
+
+/* NOTE: RTEMS (ss-20020301) uses a 'short st_ino' type :-( but the
+ * NFS fileid is 32 bit.
+ * As a workarount, we merge the upper 16bits of the fileid into the
+ * minor device no. Hence, it is still possible to uniquely identify
+ * a file by looking at its device number (major = nfs, minor = part
+ * of the fileid + our 'nfs-id' identifier).
+ *
+ * This has an impact on performance, as e.g. getcwd() stats() all
+ * directory entries when it believes it has crossed a mount point
+ * (a.st_dev != b.st_dev).
+ * 
+ * OTOH, it also might cause node comparison failure! E.g. 'getcwd()'
+ * assumes that two nodes residing in the same directory must be located
+ * on the same device and hence compares 'st_ino' only.
+ * If two files in the same directory have the same inode number
+ * modulo 2^16, they will be considered equal (although their device
+ * number doesn't match - getcwd doesn't look at it).
+ *
+ * Other software might or might not be affected.
+ *
+ * The only clean solution to this problem is bumping up the size of
+ * 'ino_t' at least to 'long'.
+ * Note that this requires _all_ software (libraries etc.) to be
+ * recompiled.
  */
-#define NFS_MAJOR	(nfsGlob.nfs_major)
-#warning TSILL need to fix device type
+
 #ifndef	INO_T_IS_4_BYTES
 #warning using short st_ino hits performance and may fail to access/find correct files
 #define	NFS_MAKE_DEV_T(node) \
 		rtems_filesystem_make_dev_t( NFS_MAJOR, \
 			(((node)->nfs->id)<<16) | (SERP_ATTR((node)).fileid >> 16) )
 #else
+/* use our 'nfs id' and the server's fsid for the minor device number
+ * this should be fairly unique
+ */
 #define	NFS_MAKE_DEV_T(node) \
 		rtems_filesystem_make_dev_t( NFS_MAJOR, \
-			(((SERP_ATTR((node)).fsid)>>16) | (((node)->nfs->id)<<16) )
+			(((node)->nfs->id)<<16) | (SERP_ATTR((node)).fsid & ((1<<16)-1)) )
 #endif
+
+#define  DIRENT_HEADER_SIZE ( sizeof(struct dirent) - \
+			sizeof( ((struct dirent *)0)->d_name ) )
+
 
 #undef  TSILLDEBUG
 
@@ -104,85 +130,22 @@ static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
 #define STATIC static
 #endif
 
-#define MUTEX_ATTRIBUTES    (RTEMS_LOCAL           | \
-                            RTEMS_PRIORITY         | \
-                            RTEMS_INHERIT_PRIORITY | \
+#define MUTEX_ATTRIBUTES    (RTEMS_LOCAL           |   \
+                            RTEMS_PRIORITY         |   \
+                            RTEMS_INHERIT_PRIORITY |   \
                             RTEMS_BINARY_SEMAPHORE)
 
-#define LOCK(s)		do { rtems_semaphore_obtain((s),RTEMS_WAIT,RTEMS_NO_TIMEOUT); } while (0) 
-#define UNLOCK(s)	do { rtems_semaphore_release((s)); } while (0)
+#define LOCK(s)		do { rtems_semaphore_obtain((s),   \
+									RTEMS_WAIT,        \
+									RTEMS_NO_TIMEOUT); \
+					} while (0) 
 
-/* These are (except for MAXNAMLEN/MAXPATHLEN) copied from IMFS */
+#define UNLOCK(s)	do { rtems_semaphore_release((s)); \
+					} while (0)
 
-static rtems_filesystem_limits_and_options_t nfs_limits_and_options = {
-   5, 				/* link_max */
-   6, 				/* max_canon */
-   7, 				/* max_input */
-   NFS_MAXNAMLEN,	/* name_max */
-   NFS_MAXPATHLEN,	/* path_max */
-   2,				/* pipe_buf */
-   1,				/* posix_async_io */
-   2,				/* posix_chown_restrictions */
-   3,				/* posix_no_trunc */
-   4,				/* posix_prio_io */
-   5,				/* posix_sync_io */
-   6				/* posix_vdisable */
-};
-
-/* size of an encoded 'entry' object */
-static int dirres_entry_size;
-
-
-static struct nfsstats {
-	rtems_id					lock;
-	rtems_device_major_number	nfs_major;
-	int							num_mounted_fs;
-	struct NfsRec_				*mounted_fs;		/* list of mounted fs */
-	/* assume we are not going to do more than 16k mounts
-	 * during the system lifetime
-	 */
-	u_short						fs_ids;
-} nfsGlob = {0};
-
-
-/* 'time()' hack with less overhead;
- * 
- */
-
-/* assume reading a long word is atomic */
-#define READ_LONG_IS_ATOMIC
-
-typedef rtems_unsigned32	TimeStamp;
-
-
-static inline TimeStamp
-nowSeconds(void)
-{
-register rtems_unsigned32	rval;
-#ifndef READ_LONG_IS_ATOMIC
-rtems_interrupt_level		l;
-
-	rtems_interrupt_disable(level);
-#endif
-
-	rval = _TOD_Seconds_since_epoch;
-
-#ifndef READ_LONG_IS_ATOMIC
-	rtems_interrupt_enable(level);
-#endif
-	return rval;
-}
-
-typedef struct DirInfoRec_ {
-	readdirargs	readdirargs;
-	/* clone of the 'readdirres' fields;
-	 * the cookie is put into the readdirargs above
-	 */
-	nfsstat		status;
-	char		*buf, *ptr;
-	int			len;
-	bool_t		eofreached;
-} DirInfoRec, *DirInfo;
+/*****************************************
+	Types with Associated XDR Routines
+ *****************************************/
 
 /* a string buffer with a maximal length.
  * If the buffer pointer is NULL, it is updated
@@ -199,11 +162,153 @@ xdr_strbuf(XDR *xdrs, strbuf *obj)
 	return xdr_string(xdrs, &obj->buf, obj->max);
 }
 
+/* Read 'readlink' results into a 'strbuf'.
+ * This is convenient as it avoids  
+ * one extra step of copying / lenght
+ * checking.
+ */
+typedef struct readlinkres_strbuf {
+	nfsstat	status;
+	strbuf	strbuf;
+} readlinkres_strbuf;
+
+static bool_t
+xdr_readlinkres_strbuf(XDR *xdrs, readlinkres_strbuf *objp)
+{
+	if ( !xdr_nfsstat(xdrs, &objp->status) )
+		return FALSE;
+
+	if ( NFS_OK == objp->status ) {
+		if ( !xdr_string(xdrs, &objp->strbuf.buf, objp->strbuf.max) )
+			return FALSE;
+	}
+	return TRUE;
+}
+
+
+/* DirInfoRec is used instead of dirresargs
+ * to convert recursion into iteration. The
+ * 'rpcgen'erated xdr_dirresargs ends up
+ * doing nested calls when unpacking the
+ * 'next' pointers.
+ */
+
+typedef struct DirInfoRec_ {
+	readdirargs	readdirargs;
+	/* clone of the 'readdirres' fields;
+	 * the cookie is put into the readdirargs above
+	 */
+	nfsstat		status;
+	char		*buf, *ptr;
+	int			len;
+	bool_t		eofreached;
+} DirInfoRec, *DirInfo;
+
+/* this deals with one entry / record */
+static bool_t
+xdr_dir_info_entry(XDR *xdrs, DirInfo di)
+{
+union	{
+	char			nambuf[NFS_MAXNAMLEN+1];
+	nfscookie		cookie;
+}				dummy;
+struct dirent	*pde = (struct dirent *)di->ptr;
+u_int			fileid;
+char			*name;
+register int	nlen,len,naligned;
+nfscookie		*pcookie;
+
+	len = di->len;
+
+	if ( !xdr_u_int(xdrs, &fileid) )
+		return FALSE;
+
+	/* we must pass the address of a char* */
+	name = (len > NFS_MAXNAMLEN) ? pde->d_name : dummy.nambuf;
+
+	if ( !xdr_filename(xdrs, &name) )
+		return FALSE;
+
+	if (len >= 0) {
+		nlen      = strlen(name);
+		naligned  = nlen + 1 /* string delimiter */ + 3 /* alignment */;
+		naligned &= ~3;
+		len      -= naligned;
+	}
+
+	/* if the cookie goes into the DirInfo, we hope this doesn't fail
+	 * - the caller ends up with an invalid readdirargs cookie otherwise...
+	 */
+	pcookie = (len >= 0) ? &di->readdirargs.cookie : &dummy.cookie;
+	if ( !xdr_nfscookie(xdrs, pcookie) )
+		return FALSE;
+
+	di->len = len;
+	/* adjust the buffer pointer */
+	if (len >= 0) {
+		pde->d_ino    = fileid;
+		pde->d_namlen = nlen;
+		pde->d_off	  = di->ptr - di->buf;
+		if (name == dummy.nambuf) {
+			memcpy(pde->d_name, dummy.nambuf, nlen + 1);
+		}
+		pde->d_reclen = DIRENT_HEADER_SIZE + naligned;
+		di->ptr      += pde->d_reclen;
+	}
+
+	return TRUE;
+}
+
+/* this routine loops over all entries */
+static bool_t
+xdr_dir_info(XDR *xdrs, DirInfo di)
+{
+DirInfo	dip;
+int		good,decoded;
+int		remaining;
+
+	if ( !xdr_nfsstat(xdrs, &di->status) )
+		return FALSE;
+
+	if ( NFS_OK != di->status )
+		return TRUE;
+
+	dip = di;
+
+	while (dip) {
+		/* reserve space for the dirent 'header' - we assume it's word aligned! */
+#ifdef DEBUG
+		assert( DIRENT_HEADER_SIZE % 4 == 0 );
+#endif
+		dip->len -= DIRENT_HEADER_SIZE;
+
+		/* we pass a 0 size - size is unused since
+		 * we always pass a non-NULL pointer
+		 */
+		if ( !xdr_pointer(xdrs, (caddr_t*)&dip, 0 /* size */, xdr_dir_info_entry) )
+			return FALSE;
+	}
+
+	if ( ! xdr_bool(xdrs, &di->eofreached) )
+		return FALSE;
+
+	return TRUE;
+}
+
+
 /* a type better suited for node operations
  * than diropres.
  * fattr and fhs are swapped so parts of this
- * structure may be used as a diroparg
+ * structure may be used as a diroparg which
+ * is practical when looking up paths.
  */
+
+/* Macro for accessing serporid fields
+ */
+#define SERP_ARGS(node) ((node)->serporid.serporid_u.serporid.arg_u)
+#define SERP_ATTR(node) ((node)->serporid.serporid_u.serporid.attributes)
+#define SERP_FILE(node) ((node)->serporid.serporid_u.serporid.file)
+
 
 typedef struct serporidok {
 	fattr					attributes;
@@ -272,7 +377,7 @@ typedef struct serporid {
  * which can then be used as an argument to subsequent
  * NFS-RPCs (after filling in the node's arg_u).
  */
-bool_t
+static bool_t
 xdr_serporidok(XDR *xdrs, serporidok *objp)
 {
     register int32_t *buf;
@@ -284,7 +389,7 @@ xdr_serporidok(XDR *xdrs, serporidok *objp)
     return TRUE;
 }   
 
-bool_t
+static bool_t
 xdr_serporid(XDR *xdrs, serporid *objp)
 {
     register int32_t *buf;
@@ -302,121 +407,157 @@ xdr_serporid(XDR *xdrs, serporid *objp)
     return TRUE;
 }
 
-bool_t
-xdr_dir_info_entry(XDR *xdrs, DirInfo di)
+/*****************************************
+	Data Structures and Types
+ *****************************************/
+
+/* 'time()' hack with less overhead; */
+
+/* assume reading a long word is atomic */
+#define READ_LONG_IS_ATOMIC
+
+typedef rtems_unsigned32	TimeStamp;
+
+static inline TimeStamp
+nowSeconds(void)
 {
-union	{
-	char			nambuf[NFS_MAXNAMLEN+1];
-	nfscookie		cookie;
-}				dummy;
-struct dirent	*pde = (struct dirent *)di->ptr;
-u_int			fileid;
-char			*name;
-register int	nlen,len,naligned;
-nfscookie		*pcookie;
+register rtems_unsigned32	rval;
+#ifndef READ_LONG_IS_ATOMIC
+rtems_interrupt_level		l;
 
-	len = di->len;
-
-	if ( !xdr_u_int(xdrs, &fileid) )
-		return FALSE;
-
-	/* we must pass the address of a char* */
-	name = (len > NFS_MAXNAMLEN) ? pde->d_name : dummy.nambuf;
-
-	if ( !xdr_filename(xdrs, &name) )
-		return FALSE;
-
-	if (len >= 0) {
-		nlen      = strlen(name);
-		naligned  = nlen + 1 /* string delimiter */ + 3 /* alignment */;
-		naligned &= ~3;
-		len      -= naligned;
-	}
-
-	/* if the cookie goes into the DirInfo, we hope this doesn't fail
-	 * - the caller ends up with an invalid readdirargs cookie otherwise...
-	 */
-	pcookie = (len >= 0) ? &di->readdirargs.cookie : &dummy.cookie;
-	if ( !xdr_nfscookie(xdrs, pcookie) )
-		return FALSE;
-
-	di->len = len;
-	/* adjust the buffer pointer */
-	if (len >= 0) {
-		pde->d_ino    = fileid;
-		pde->d_namlen = nlen;
-		pde->d_off	  = di->ptr - di->buf;
-		if (name == dummy.nambuf) {
-			memcpy(pde->d_name, dummy.nambuf, nlen + 1);
-		}
-		pde->d_reclen = DIRENT_HEADER_SIZE + naligned;
-		di->ptr      += pde->d_reclen;
-	}
-
-	return TRUE;
-}
-
-bool_t
-xdr_dir_info(XDR *xdrs, DirInfo di)
-{
-DirInfo	dip;
-int		good,decoded;
-int		remaining;
-int		tsill=0;
-
-	if ( !xdr_nfsstat(xdrs, &di->status) )
-		return FALSE;
-
-	if ( NFS_OK != di->status )
-		return TRUE;
-
-	dip = di;
-
-	while (dip) {
-		/* reserve space for the dirent 'header' - we assume it's word aligned! */
-#ifdef DEBUG
-		assert( DIRENT_HEADER_SIZE % 4 == 0 );
+	rtems_interrupt_disable(level);
 #endif
-		dip->len -= DIRENT_HEADER_SIZE;
 
-		/* we pass a 0 size - size is unused since
-		 * we always pass a non-NULL pointer
-		 */
-		if ( !xdr_pointer(xdrs, (caddr_t*)&dip, 0 /* size */, xdr_dir_info_entry) )
-			return FALSE;
-		tsill++;
-	}
+	rval = _TOD_Seconds_since_epoch;
 
-	if ( ! xdr_bool(xdrs, &di->eofreached) )
-		return FALSE;
-
-	return TRUE;
+#ifndef READ_LONG_IS_ATOMIC
+	rtems_interrupt_enable(level);
+#endif
+	return rval;
 }
+
 
 /* Per mounted FS structure */
 typedef struct NfsRec_ {
+		/* the NFS server we're talking to.
+		 */
 	RpcUdpServer						 server;
+		/* statistics; how many NfsNodes are
+		 * currently alive.
+		 */
 	int									 nodesInUse;
 #if DEBUG & DEBUG_COUNT_NODES
+		/* statistics; how many 'NfsNode.str'
+		 * strings are currently allocated.
+		 */
 	int									 stringsInUse;
 #endif
+		/* A small number who uniquely
+		 * identifies a mounted NFS within
+		 * this driver (i.e. this NfsRec).
+		 * Each time a NFS is mounted, the
+		 * global ID counter is incremented
+		 * and its value is assigned to the
+		 * newly created NfsRec.
+		 */
 	u_short								 id;
+		/* Our RTEMS filesystem mt_entry
+		 */ 
 	rtems_filesystem_mount_table_entry_t *mt_entry;
+		/* Next NfsRec on a linked list who
+		 * is anchored at nfsGlob 
+		 */
 	struct NfsRec_						 *next;
 } NfsRec, *Nfs;
 
 typedef struct NfsNodeRec_ {
+		/* This holds this node's attributes
+		 * (stats) and its nfs filehandle.
+		 * It also contains room for nfs rpc
+		 * arguments.
+		 */
 	serporid	serporid;
-	diropargs		args;	/* we must remember the diropargs to have a
-							   handle to the directory when unlinking
-							   entries */
-
-	Nfs				nfs;	/* fs this node belongs to */
-	char		   *str;	/* string buffer */
-	TimeStamp		age;	/* age of the stats */
+		/* The arguments we used when doing
+		 * the 'lookup' call for this node.
+		 * We need this information (especially
+		 * the directory FH) for performing
+		 * certain operations on this
+		 * node (in particular: for unlinking
+		 * it from a parent directory)
+		 */
+	diropargs		args;
+		/* FS this node belongs to
+		 */
+	Nfs				nfs;
+		/* A buffer for the string the
+		 * args.name points to.
+		 * We need this because args.name might
+		 * temporarily point to strings on the
+		 * stack. Duplicates are allocated from
+		 * the heap and attached to 'str' so
+		 * they can be released as appropriate.
+		 */
+	char		   *str;
+		/* A timestamp for the stats
+		 */
+	TimeStamp		age;
 } NfsNodeRec, *NfsNode;
 
-/* Forward declarations */
+/* * * * * * * * * * * * * * * * * *
+	Trivial Operations on a NfsNode 
+ * * * * * * * * * * * * * * * * * */
+
+/* determine if a location 'l' is an NFS root node */
+static inline int
+locIsRoot(rtems_filesystem_location_info_t *l)
+{
+NfsNode me = (NfsNode) l->node_access;
+NfsNode r;
+	r = (NfsNode)l->mt_entry->mt_fs_root.node_access;
+	return SERP_ATTR(r).fileid == SERP_ATTR(me).fileid &&
+		   SERP_ATTR(r).fsid   == SERP_ATTR(me).fsid;
+}
+
+/* determine if a location 'l' is an NFS node */
+static inline int
+locIsNfs(rtems_filesystem_location_info_t *l)
+{
+	return l->ops == &nfs_fs_ops;
+}
+
+/* determine if two locations refer to the
+ * same entity. We know that 'nfsloc' is a
+ * location inside nfs. However, we needn't
+ * know anything about 'anyloc'.
+ */
+static inline int
+locAreEqual(
+	rtems_filesystem_location_info_t *nfsloc,
+	rtems_filesystem_location_info_t *anyloc
+)
+{
+NfsNode na = (NfsNode) nfsloc->node_access;
+NfsNode nb;
+
+	if (!locIsNfs(anyloc))
+		return 0;
+
+	nb = (NfsNode) anyloc->node_access;
+
+	if (na->nfs != nb->nfs)
+		return 0;
+
+	updateAttr(nb, 0);
+
+	return SERP_ATTR(na).fileid == SERP_ATTR(nb).fileid &&
+		   SERP_ATTR(na).fsid   == SERP_ATTR(nb).fsid;
+}
+
+
+/*****************************************
+	Forward Declarations
+ *****************************************/
+
 static int nfs_do_eval_link(
 	rtems_filesystem_location_info_t *pathloc,
 	void                              *arg,
@@ -431,6 +572,15 @@ static int nfs_readlink(
 
 static int updateAttr(NfsNode node, int force);
 
+/* Mask bits when setting attributes.
+ * Only the 'arg' fields with their
+ * corresponding bit set in the mask
+ * will be used. The others are left
+ * unchanged.
+ * The 'TOUCH' bits instruct nfs_sattr()
+ * to update the respective time
+ * fields to the current time
+ */
 #define	SATTR_MODE		(1<<0)
 #define	SATTR_UID		(1<<1)
 #define	SATTR_GID		(1<<2)
@@ -444,50 +594,136 @@ static int updateAttr(NfsNode node, int force);
 static int
 nfs_sattr(NfsNode node, sattr *arg, u_long mask);
 
-#define SERP_ARGS(node) ((node)->serporid.serporid_u.serporid.arg_u)
-#define SERP_ATTR(node) ((node)->serporid.serporid_u.serporid.attributes)
-#define SERP_FILE(node) ((node)->serporid.serporid_u.serporid.file)
-
-#ifdef TSILLDEBUG
-NfsNode		 dbgRoot=0;
-RpcUdpServer dbgSrv=0;
-#endif
-
-static RpcUdpXactPool smallPool = 0;
-static RpcUdpXactPool bigPool   = 0;
-
 extern struct _rtems_filesystem_operations_table nfs_fs_ops;
 extern struct _rtems_filesystem_file_handlers_r	 nfs_file_file_handlers;
 extern struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
 extern struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
 extern		   rtems_driver_address_table		 drvNfs;
 
-Nfs
+/*****************************************
+	Global Variables
+ *****************************************/
+
+/* These are (except for MAXNAMLEN/MAXPATHLEN) copied from IMFS */
+
+static rtems_filesystem_limits_and_options_t
+nfs_limits_and_options = {
+   5, 				/* link_max */
+   6, 				/* max_canon */
+   7, 				/* max_input */
+   NFS_MAXNAMLEN,	/* name_max */
+   NFS_MAXPATHLEN,	/* path_max */
+   2,				/* pipe_buf */
+   1,				/* posix_async_io */
+   2,				/* posix_chown_restrictions */
+   3,				/* posix_no_trunc */
+   4,				/* posix_prio_io */
+   5,				/* posix_sync_io */
+   6				/* posix_vdisable */
+};
+
+/* size of an encoded 'entry' object */
+static int dirres_entry_size;
+
+/* Global stuff and statistics */
+static struct nfsstats {
+		/* A lock for protecting misc
+		 * stuff (such as the fields
+		 * of this struct) within the
+		 * driver.
+		 * The lock must only be held
+		 * for short periods of time.
+		 */
+	rtems_id					lock;
+		/* Our major number as assigned
+		 * by RTEMS
+		 */
+	rtems_device_major_number	nfs_major;
+		/* The number of currently
+		 * mounted NFS
+		 */
+	int							num_mounted_fs;
+		/* A list of the currently
+		 * mounted NFS
+		 */
+	struct NfsRec_				*mounted_fs;
+		/* A counter for allocating
+		 * unique IDs to each mounted
+		 * NFS.
+		 * Assume we are not going to
+		 * do more than 16k mounts
+		 * during the system lifetime
+		 */
+	u_short						fs_ids;
+} nfsGlob = {0/* IMPORTANT */};
+
+
+#ifdef TSILLDEBUG
+NfsNode		 dbgRoot=0;
+RpcUdpServer dbgSrv=0;
+#endif
+
+/* Two pools of RPC transactions;
+ * One with small send buffers
+ * the other with a big one.
+ * The actual size of the small
+ * buffer is configurable (see top).
+ *
+ * Note: The RX buffers are always
+ * big
+ */
+static RpcUdpXactPool smallPool = 0;
+static RpcUdpXactPool bigPool   = 0;
+
+
+/*****************************************
+	Implementation
+ *****************************************/
+
+/* Create a Nfs object. This is
+ * per-mounted NFS information.
+ *
+ * ARGS:	The Nfs server handle.
+ *
+ * RETURNS:	Nfs on success,
+ * 			NULL on failure with
+ * 			errno set
+ *
+ * NOTE:	The submitted server
+ * 			object is 'owned' by
+ * 			this Nfs and will be
+ * 			destroyed by nfsDestroy()
+ */
+static Nfs
 nfsCreate(RpcUdpServer server)
 {
 Nfs rval = calloc(1,sizeof(*rval));
 
 	if (rval) {
 		rval->server     = server;
+		LOCK(nfsGlob.lock);
+			rval->next 		   = nfsGlob.mounted_fs;
+			nfsGlob.mounted_fs = rval;
+		UNLOCK(nfsGlob.lock);
+	} else {
+		errno = ENOMEM;
 	}
-	LOCK(nfsGlob.lock);
-		rval->next 		   = nfsGlob.mounted_fs;
-		nfsGlob.mounted_fs = rval;
-	UNLOCK(nfsGlob.lock);
-
-	return rval;
+		return rval;
 }
 
-void
+/* Destroy an Nfs object and
+ * its associated server
+ */
+static void
 nfsDestroy(Nfs nfs)
 {
-Nfs prev;
+register Nfs prev;
 	if (!nfs)
 		return;
 
 	LOCK(nfsGlob.lock);
 		if (nfs == nfsGlob.mounted_fs)
-			nfsGlob.mounted_fs = 0;
+			nfsGlob.mounted_fs = nfs->next;
 		else {
 			for (prev = nfsGlob.mounted_fs;
 				 prev && prev->next != nfs;
@@ -503,6 +739,32 @@ Nfs prev;
 	free(nfs);
 }
 
+/*
+ * Create a Node. The node will
+ * be associated with a particular
+ * mounted NFS identified by 'nfs'
+ * Optionally, a NFS file handle
+ * may be copied into this node.
+ *
+ * ARGS:	nfs of the NFS this node
+ * 			belongs to.
+ * 			NFS file handle identifying
+ * 			this node.
+ * RETURNS:	node on success,
+ * 			NULL on failure with errno
+ * 			set.
+ *
+ * NOTE:	The caller of this routine
+ * 			is responsible for copying
+ * 			a NFS file handle if she
+ * 			choses to pass a NULL fh.
+ *
+ * 			The driver code assumes the
+ * 			a node always has a valid
+ * 			NFS filehandle and file
+ * 			attributes (unless the latter
+ * 			are aged).
+ */
 static NfsNode
 nfsNodeCreate(Nfs nfs, nfs_fh *fh)
 {
@@ -527,6 +789,7 @@ NfsNode	rval = malloc(sizeof(*rval));
 	return rval;
 }
 
+/* destroy a node */
 static void
 nfsNodeDestroy(NfsNode node)
 {
@@ -554,6 +817,21 @@ nfsNodeDestroy(NfsNode node)
 	free(node);
 }
 
+/* Clone a given node (AKA copy constructor),
+ * i.e. create an exact copy.
+ *
+ * ARGS:	node to clone
+ * RETURNS:	new node on success
+ * 			NULL on failure with errno set.
+ *
+ * NOTE:	a string attached to 'str'
+ * 			is cloned as well. Outdated
+ * 			attributes (of the new copy
+ * 			only) will be refreshed
+ * 			(if unsuccessful, this could
+ * 			be a reason for failure to
+ * 			clone a node).
+ */
 static NfsNode
 nfsNodeClone(NfsNode node)
 {
@@ -585,6 +863,17 @@ NfsNode rval = nfsNodeCreate(node->nfs, 0);
 	return rval;
 }
 
+/* Initialize the driver.
+ *
+ * ARGS:	depth of the small and big
+ * 			transaction pools, i.e. how
+ * 			many transactions (buffers)
+ * 			should always be kept around.
+ *
+ * 			(If more transactions are needed,
+ * 			they are created and destroyed
+ * 			on the fly).
+ */
 void
 nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
@@ -629,12 +918,29 @@ entry	dummy;
 							&nfsGlob.lock) );
 }
 
-/* this should probably be called with the lock held */
-void
+/* Driver cleanup code
+ */
+int
 nfsCleanup(void)
 {
-rtems_id l;
+rtems_id	l;
+int			refuse;
+Nfs			nfs;
 
+	LOCK(nfsGlob.lock);
+	if (refuse = nfsGlob.num_mounted_fs) {
+		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted:\n",
+						refuse);
+		for (nfs = nfsGlob.mounted_fs; nfs; nfs=nfs->next)
+			fprintf(stderr,"%s\n",nfs->mt_entry->dev);
+		/* yes, printing is slow - but since you try to unload the driver,
+		 * you assume nobody is using NFS, so what if they have to wait?
+		 */
+		UNLOCK(nfsGlob.lock);
+		return -1;
+	}
+
+	/* hold the lock while cleaning up... */
 
 	rpcUdpXactPoolDestroy(smallPool);
 	rpcUdpXactPoolDestroy(bigPool);
@@ -643,8 +949,10 @@ rtems_id l;
 
 	rtems_semaphore_delete(l);
 	nfsGlob.lock = 0;
+	return 0;
 }
 
+/* CEXP dynamic loader support */
 static void
 _cexpModuleInitialize(void *mod)
 {	
@@ -654,50 +962,30 @@ _cexpModuleInitialize(void *mod)
 static int
 _cexpModuleFinalize(void *mod)
 {	
-int refuse;
-Nfs	nfs;
-
-
-	LOCK(nfsGlob.lock);
-	if (refuse = nfsGlob.num_mounted_fs) {
-		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted:\n",
-						refuse);
-		for (nfs = nfsGlob.mounted_fs; nfs; nfs=nfs->next)
-			fprintf(stderr,"%s\n",nfs->mt_entry->dev);
-		/* yes, printing is slow - but since you try to unload the driver,
-		 * you assume nobody is using NFS, so what?
-		 */
-		UNLOCK(nfsGlob.lock);
-		return -1;
-	}
-	/* hold the lock while cleaning up... */
-	nfsCleanup();
-	return 0;
+	return nfsCleanup();
 }
 
-/*
- * File system types
+
+/* NFS RPC wrapper.
+ *
+ * ARGS:	srvr	the NFS server we want to call
+ * 			proc	the NFSPROC_xx we want to invoke
+ * 			xargs   xdr routine to wrap the arguments
+ * 			pargs   pointer to the argument object
+ * 			xres	xdr routine to unwrap the results
+ * 			pres	pointer to the result object
+ *
+ * RETURNS:	0 on success, -1 on error with errno set.
+ *
+ * NOTE:	the caller assumes that errno is set to
+ *			a nonzero value if this routine returns
+ *			an error (nonzero return value).
+ *
+ *			This routine prints RPC error messages to
+ *			stderr.
  */
-
-#if 0 /* for reference */
-
-struct rtems_filesystem_location_info_tt
-{
-   void                                 *node_access;
-   rtems_filesystem_file_handlers_r     *handlers;
-   rtems_filesystem_operations_table    *ops;
-   rtems_filesystem_mount_table_entry_t *mt_entry;
-};
-
-#endif
-
-
-/* NOTE: the calling code assumes that errno is set to
- *       a nonzero value if this routine returns an error
- *       (nonzero return value).
- */
-int
-nfscallSmall(
+STATIC int
+nfscall(
 	RpcUdpServer	srvr,
 	int				proc,
 	xdrproc_t		xargs,
@@ -761,7 +1049,20 @@ int				rval = -1;
 	return rval;
 }
 
-static int updateAttr(NfsNode node, int force)
+/* Check the 'age' of a node's stats
+ * and read the attributes from the server
+ * if necessary.
+ * 
+ * ARGS:	node	node to update
+ * 			force	enforce updating ignoring
+ * 					the timestamp/age
+ *
+ * RETURNS:	0 on success,
+ * 			-1 on failure with errno set
+ */
+
+static int
+updateAttr(NfsNode node, int force)
 {
 
 	if (force
@@ -769,7 +1070,7 @@ static int updateAttr(NfsNode node, int force)
 		|| (nowSeconds() - node->age > CONFIG_ATTR_LIFETIME)
 #endif
 		) {
-		if ( nfscallSmall(node->nfs->server,
+		if ( nfscall(node->nfs->server,
 					  NFSPROC_GETATTR,
 					  xdr_nfs_fh,	&SERP_FILE(node),
 					  xdr_attrstat, &node->serporid) )
@@ -786,11 +1087,18 @@ static int updateAttr(NfsNode node, int force)
 	return 0;
 }
 
-/* initialize a sockaddr_in from a
+/*
+ * IP address helper. Note that we avoid
+ * gethostbyname() since it's not reentrant.
+ *
+ * initialize a sockaddr_in from a
  * "<host>':'<path>" string and let
  * pPath point to the <path> part
  *
- * RETURNS: 0 on success, -1 on failure with errno set
+ * ARGS:	see description above
+ *
+ * RETURNS:	0 on success,
+ * 			-1 on failure with errno set
  */
 static int
 buildIpAddr(char **pPath, struct sockaddr_in *psa)
@@ -830,7 +1138,16 @@ int		len;
 	return 0;
 }
 
-enum clnt_stat
+/* wrapper similar to nfscall.
+ * However, since it is not used
+ * very often, the simpler and less
+ * efficient rpcUdpClnt API is used.
+ *
+ * ARGS:	see 'nfscall()' above
+ *
+ * RETURNS:	RPC status
+ */
+static enum clnt_stat
 mntcall(
 	struct sockaddr_in	*psrvr,
 	int					proc,
@@ -872,67 +1189,48 @@ enum clnt_stat		stat;
 
 	return stat;
 }
-	
 
-#if 0
-int
-lk1(char *name)
+/*****************************************
+	RTEMS File System Operations for NFS
+ *****************************************/
+
+#if 0 /* for reference */
+
+struct rtems_filesystem_location_info_tt
 {
-diropres			res;
-fattr				*f;
-enum clnt_stat		stat;
-extern diropargs dbg_diropargs;
+   void                                 *node_access;
+   rtems_filesystem_file_handlers_r     *handlers;
+   rtems_filesystem_operations_table    *ops;
+   rtems_filesystem_mount_table_entry_t *mt_entry;
+};
 
-
-	dbg_diropargs.name=name;
-	if (nfscallSmall(dbgSrv,
-				NFSPROC_LOOKUP,
-				xdr_diropargs, &dbg_diropargs,
-				xdr_diropres,  &res
-				)) {
-		fprintf(stderr,"Error %s\n", strerror(errno));
-		goto cleanup;
-	}
-
-	if (res.status) {
-		fprintf(stderr,"NFS Error %i (?%s?)\n", res.status, strerror(res.status));
-		goto cleanup;
-	}
-	f = &res.diropres_u.diropres.attributes;
-	fprintf(stderr,"type   %i\n", f->type);
-	fprintf(stderr,"mode   %i\n", f->mode);
-	fprintf(stderr,"nlink  %i\n", f->nlink);
-	fprintf(stderr,"fileid %i\n", f->fileid);
-	fprintf(stderr,"uid    %i\n", f->uid);
-	if (NFDIR == f->type)
-		memcpy( &dbg_diropargs.dir,
-				&res.diropres_u.diropres.file,
-				sizeof(dbg_diropargs.dir));
-
-cleanup:
-	xdr_free(xdr_diropres,(void*)&res);
-
-}
 #endif
 
-/* determine if a location 'l' is an NFS root node */
-static inline int
-locIsRoot(rtems_filesystem_location_info_t *l)
-{
-NfsNode me = (NfsNode) l->node_access;
-NfsNode r;
-	r = (NfsNode)l->mt_entry->mt_fs_root.node_access;
-	return SERP_ATTR(r).fileid == SERP_ATTR(me).fileid &&
-		   SERP_ATTR(r).fsid   == SERP_ATTR(me).fsid;
-}
-
-/* determine if a location 'l' is an NFS node */
-static inline int
-locIsNfs(rtems_filesystem_location_info_t *l)
-{
-	return l->ops == &nfs_fs_ops;
-}
-
+/*
+ * Evaluate a path letting 'pathloc' travel along.
+ *
+ * The important semantics of this operation are:
+ *
+ * If this routine returns -1, the caller assumes
+ * pathloc to be _invalid_ and hence it will not
+ * invoke rtems_filesystem_freenode() on it.
+ *
+ * OTOH, if evalpath returns 0,
+ * rtems_filesystem_freenode() will eventually be
+ * called which results in our freeing the associated
+ * NfsNode attached to node_access.
+ *
+ * Therefore, this routine will _always_ allocate
+ * a NfsNode and pass it out to *pathloc (provided
+ * that the evaluation succeeds).
+ *
+ * However, if the evaluation finds that it has to
+ * step across FS boundaries (mount point or a symlink
+ * pointing outside), the NfsNode is destroyed
+ * before passing control to the new FS' evalpath_h()
+ *
+ */
+	
 STATIC int nfs_do_evalpath(
 	const char                        *pathname,      /* IN     */
 	void                              *arg,
@@ -1017,6 +1315,12 @@ RpcUdpServer	server = nfs->server;
 			} while (DELIM==*del);
 		}
 
+		/* refuse to backup over the root */
+		if ( 0==strcmp(part,UPDIR)
+			 && locAreEqual(pathloc, rtems_filesystem_root) ) {
+			part++;
+		}
+
 		/* cross mountpoint upwards */
 		if ( (0==strcmp(part,UPDIR) && locIsRoot(pathloc)) /* cross mountpoint up */
 			|| DELIM == *part                              /* link starts at root */
@@ -1069,7 +1373,7 @@ RpcUdpServer	server = nfs->server;
 		fprintf(stderr,"Looking up '%s'\n",part);
 #endif
 
-		if ( nfscallSmall(server,
+		if ( nfscall(server,
 						 NFSPROC_LOOKUP,
 						 xdr_diropargs, &SERP_FILE(node),
 						 xdr_serporid,  &node->serporid) ||
@@ -1115,7 +1419,7 @@ RpcUdpServer	server = nfs->server;
 				&node->args.dir,
 				sizeof(node->args.dir));
 
-		if ( (nfscallSmall(nfs->server,
+		if ( (nfscall(nfs->server,
 						NFSPROC_GETATTR,
 						xdr_nfs_fh,   &SERP_FILE(node),
 						xdr_attrstat, &node->serporid) && !errno && (errno = EIO)) ||
@@ -1209,7 +1513,7 @@ static int nfs_evalformake(
 	const char                      **pname       /* OUT    */
 )
 {
-	return nfs_do_evalpath(path, (void*)pname, pathloc, 1);
+	return nfs_do_evalpath(path, (void*)pname, pathloc, 1 /*forMake*/);
 }
 
 static int nfs_evalpath(
@@ -1218,9 +1522,11 @@ static int nfs_evalpath(
 	rtems_filesystem_location_info_t *pathloc    /* IN/OUT */
 )
 {
-	return nfs_do_evalpath(path, (void*)flags, pathloc, 0);
+	return nfs_do_evalpath(path, (void*)flags, pathloc, 0 /*not forMake*/);
 }
 
+
+/* create a hard link */
 
 static int nfs_link(
 	rtems_filesystem_location_info_t  *to_loc,      /* IN */
@@ -1252,7 +1558,7 @@ NfsNode tNode = to_loc->node_access;
 
 	SERP_ARGS(tNode).linkarg.to.name = (filename)name;
 
-	if ( nfscallSmall(tNode->nfs->server,
+	if ( nfscall(tNode->nfs->server,
 					  NFSPROC_LINK,
 					  xdr_linkargs,	&SERP_FILE(tNode),
 					  xdr_nfsstat,	&status)
@@ -1277,9 +1583,9 @@ nfsstat			status;
 NfsNode			node  = loc->node_access;
 Nfs				nfs   = node->nfs;
 #if DEBUG & DEBUG_SYSCALLS
-char			*name = NFSPROC_REMOVE == proc ? "nfs_unlink" : "nfs_rmdir";
+char			*name = NFSPROC_REMOVE == proc ?
+							"nfs_unlink" : "nfs_rmdir";
 #endif
-
 
 	/* The FS generics have determined that pathloc is _not_
 	 * a directory. Hence we may assume that the parent
@@ -1292,12 +1598,12 @@ char			*name = NFSPROC_REMOVE == proc ? "nfs_unlink" : "nfs_rmdir";
 	fprintf(stderr,"%s '%s'\n", name, node->args.name);
 #endif
 
-	if ( nfscallSmall(nfs->server,
-						proc,
-						xdr_diropargs,	&node->args,
-						xdr_nfsstat,	&status)
+	if ( nfscall(nfs->server,
+				 proc,
+				 xdr_diropargs,	&node->args,
+				 xdr_nfsstat,	&status)
 	     || (NFS_OK != (errno = status))
-	   ) {
+	    ) {
 #if DEBUG & DEBUG_SYSCALLS
 		perror(name);
 #endif
@@ -1353,10 +1659,23 @@ Nfs	nfs    = ((NfsNode)pathloc->node_access)->nfs;
 #if DEBUG & DEBUG_COUNT_NODES
 	fprintf(stderr,
 			"leaving freenode, in use count is %i nodes, %i strings\n",
-			nfs->nodesInUse, nfs->stringsInUse);
+			nfs->nodesInUse,
+			nfs->stringsInUse);
 #endif
 	return 0;
 }
+
+/* NOTE/TODO: mounting on top of NFS is not currently supported
+ *
+ * Challenge: stateless protocol. It would be possible to
+ * delete mount points on the server. We would need some sort
+ * of a 'garbage collector' looking for dead/unreachable
+ * mount points and unmounting them.
+ * Also, the path evaluation routine would have to check
+ * for crossing mount points. Crossing over from one NFS
+ * into another NFS could probably handled iteratively
+ * rather than by recursion.
+ */
 
 #ifdef DECLARE_BODY
 /* This routine is called when they try to mount something
@@ -1368,6 +1687,17 @@ static int nfs_mount(
 )DECLARE_BODY
 #else
 #define nfs_mount 0
+#endif
+
+#ifdef DECLARE_BODY
+/* This op is called when they try to unmount a FS
+ * from a mountpoint managed by THIS FS.
+ */
+static int nfs_unmount(
+	rtems_filesystem_mount_table_entry_t *mt_entry     /* in */
+)DECLARE_BODY
+#else
+#define nfs_unmount 0
 #endif
 
 #if 0
@@ -1438,7 +1768,7 @@ char				*path     = mt_entry->dev;
 	/* first, try to ping the NFS server by
 	 * calling the NULL proc.
 	 */
-	if (nfscallSmall(nfsServer,
+	if (nfscall(nfsServer,
 					 NFSPROC_NULL,
 					 xdr_void, 0,
 					 xdr_void, 0)) {
@@ -1533,17 +1863,6 @@ cleanup:
 		return 0;
 }
 
-#ifdef DECLARE_BODY
-/* This op is called when they try to unmount a FS
- * from a mountpoint managed by THIS FS.
- */
-static int nfs_unmount(
-	rtems_filesystem_mount_table_entry_t *mt_entry     /* in */
-)DECLARE_BODY
-#else
-#define nfs_unmount 0
-#endif
-
 /* This op is called when they try to unmount THIS fs */
 STATIC int nfs_fsunmount_me(
 	rtems_filesystem_mount_table_entry_t *mt_entry    /* in */
@@ -1559,7 +1878,9 @@ int					nodesInUse;
 	UNLOCK(nfsGlob.lock);
 
 	if (nodesInUse > 1 /* one ref to the root node used by us */) {
-		fprintf(stderr,"Refuse to unmount; there are still %i nodes in use (1 used by us)", nodesInUse);
+		fprintf(stderr,
+				"Refuse to unmount; there are still %i nodes in use (1 used by us)\n",
+				nodesInUse);
 		rtems_set_errno_and_return_minus_one(EBUSY);
 	}
 
@@ -1591,6 +1912,7 @@ int					nodesInUse;
 
 /* OPTIONAL; may be NULL - BUT: CAUTION; mount() doesn't check
  * for this handler to be present - a fs bug
+ * //NOTE: (10/25/2002) patch submitted and probably applied
  */
 static rtems_filesystem_node_types_t nfs_node_type(
 	rtems_filesystem_location_info_t    *pathloc      /* in */
@@ -1655,7 +1977,7 @@ mode_t					type = S_IFMT & mode;
 	SERP_ARGS(node).createarg.attributes.mtime.seconds	= now.seconds;
 	SERP_ARGS(node).createarg.attributes.mtime.useconds	= now.microseconds;
 
-	if ( nfscallSmall( node->nfs->server,
+	if ( nfscall( node->nfs->server,
 						NFSPROC_CREATE,
 						xdr_createargs,	&SERP_FILE(node),
 						xdr_diropres,	&res)
@@ -1716,10 +2038,10 @@ NfsNode					node = loc->node_access;
 	SERP_ARGS(node).symlinkarg.attributes.mtime.seconds	 = now.seconds;
 	SERP_ARGS(node).symlinkarg.attributes.mtime.useconds = now.microseconds;
 
-	if ( nfscallSmall( node->nfs->server,
+	if ( nfscall( node->nfs->server,
 						NFSPROC_SYMLINK,
-						xdr_createargs,	&SERP_FILE(node),
-						xdr_nfsstat,	&status)
+						xdr_symlinkargs,	&SERP_FILE(node),
+						xdr_nfsstat,		&status)
 		|| (NFS_OK != (errno = status)) ) {
 #if DEBUG & DEBUG_SYSCALLS
 		perror("nfs_symlink");
@@ -1728,24 +2050,6 @@ NfsNode					node = loc->node_access;
 	}
 
 	return 0;
-}
-
-typedef struct readlinkres_strbuf {
-	nfsstat	status;
-	strbuf	strbuf;
-} readlinkres_strbuf;
-
-static bool_t
-xdr_readlinkres_strbuf(XDR *xdrs, readlinkres_strbuf *objp)
-{
-	if ( !xdr_nfsstat(xdrs, &objp->status) )
-		return FALSE;
-
-	if ( NFS_OK == objp->status ) {
-		if ( !xdr_string(xdrs, &objp->strbuf.buf, objp->strbuf.max) )
-			return FALSE;
-	}
-	return TRUE;
 }
 
 static int nfs_do_readlink(
@@ -1763,7 +2067,7 @@ int					rval;
 
 	wasAlloced = (0 == psbuf->buf);
 
-	if ( (rval = nfscallSmall(nfs->server,
+	if ( (rval = nfscall(nfs->server,
 							NFSPROC_READLINK,
 							xdr_nfs_fh,      		&SERP_FILE(node),
 							xdr_readlinkres_strbuf, &rr)) ) {
@@ -1878,7 +2182,14 @@ int	 							rval = RVAL_ERR_AND_DO_FREENODE;
 
 				err = nfs_evalpath(buf, flags, pathloc);
 
-				nfsNodeDestroy(node); /* nfs_evalpath cloned the node */
+				/* according to its semantics,
+				 * nfs_evalpath cloned the node attached
+				 * to pathloc. Hence we have to
+				 * release the old one (referring to
+				 * the link; the new clone has been
+				 * updated and refers to the link _value_).
+				 */
+				nfsNodeDestroy(node);
 
 				if (err) {
 					/* nfs_evalpath has set errno;
@@ -1903,6 +2214,7 @@ int	 							rval = RVAL_ERR_AND_DO_FREENODE;
 				}
 			}
 		} else {
+			/* link points to an absolute path '/xxx' */
 				
 			/* release this node; filesystem_evaluate_path() will
 			 * lookup a new one.
@@ -1959,6 +2271,31 @@ struct _rtems_filesystem_operations_table nfs_fs_ops = {
 		nfs_readlink,		/* OPTIONAL; may be NULL */
 };
 
+/*****************************************
+	File Handlers
+
+	NOTE: the FS generics expect a FS'
+	      evalpath_h() to switch the
+		  pathloc->handlers according
+		  to the pathloc/node's file
+		  type.
+		  We currently have 'file' and
+		  'directory' handlers and very
+		  few 'symlink' handlers.
+
+		  The handlers for each type are
+		  implemented or #defined ZERO
+		  in a 'nfs_file_xxx',
+		  'nfs_dir_xxx', 'nfs_link_xxx'
+		  sequence below this point.
+
+		  In some cases, a common handler,
+		  can be used for all file types.
+		  It is then simply called
+		  'nfs_xxx'.
+ *****************************************/
+
+
 #if 0
 /* from rtems/libio.h for convenience */
 struct rtems_libio_tt {
@@ -1975,10 +2312,7 @@ struct rtems_libio_tt {
 };
 #endif
 
-/*
- *  File Handler Operations Table
- */
-
+/* stateless NFS protocol makes this trivial */
 static int nfs_file_open(
 	rtems_libio_t *iop,
 	const char    *pathname,
@@ -1990,6 +2324,11 @@ static int nfs_file_open(
 	return 0;
 }
 
+/* reading directories is not stateless; we must
+ * remember the last 'read' position, i.e.
+ * the server 'cookie'. We do manage this information
+ * attached to the iop->file_info.
+ */
 static int nfs_dir_open(
 	rtems_libio_t *iop,
 	const char    *pathname,
@@ -2065,7 +2404,7 @@ Nfs		nfs  = node->nfs;
 
 	rr.readres_u.reply.data.data_val	= buffer;
 
-	if ( nfscallSmall(	nfs->server,
+	if ( nfscall(	nfs->server,
 						NFSPROC_READ,
 						xdr_readargs,	&SERP_FILE(node),
 						xdr_readres,	&rr) ) {
@@ -2123,7 +2462,7 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 			count, di->len);
 #endif
 
-	if ( nfscallSmall(
+	if ( nfscall(
 					server,
 					NFSPROC_READDIR,
 					xdr_readdirargs, &di->readdirargs,
@@ -2165,7 +2504,7 @@ int			e;
 	 * on the PROC specifier
 	 */
 
-	if ( nfscallSmall(	nfs->server,
+	if ( nfscall(	nfs->server,
 						NFSPROC_WRITE,
 						xdr_writeargs,	&SERP_FILE(node),
 						xdr_attrstat,	&node->serporid) ) {
@@ -2187,6 +2526,7 @@ int			e;
 #define nfs_dir_write  0
 #define nfs_link_write 0
 
+/* IOCTL is unneeded/unsupported */
 #ifdef DECLARE_BODY
 static int nfs_file_ioctl(
 	rtems_libio_t *iop,
@@ -2217,6 +2557,9 @@ static int nfs_dir_lseek(
 {
 DirInfo di = iop->file_info;
 
+	/* we don't support anything other than
+	 * rewinding
+	 */
 	if (SEEK_SET != whence || 0 != length) {
 		errno = ENOTSUP;
 		return -1;
@@ -2281,6 +2624,7 @@ struct  stat
 };
 #endif
 
+/* common for file/dir/link */
 static int nfs_fstat(
 	rtems_filesystem_location_info_t *loc,
 	struct stat                      *buf
@@ -2332,32 +2676,10 @@ fattr	*fa  = &SERP_ATTR(node);
 	return 0;
 }
 
-static int nfs_fchmod(
-	rtems_filesystem_location_info_t *loc,
-	mode_t                            mode
-)
-{
-sattr	arg;
-
-	arg.mode = mode;
-	return nfs_sattr(loc->node_access, &arg, SATTR_MODE);
-	
-}
-
-static int nfs_file_ftruncate(
-	rtems_libio_t *iop,
-	off_t          length
-)
-{
-rtems_clock_time_value	now;
-sattr					arg;
-
-	arg.size = length;
-	return nfs_sattr(iop->pathinfo.node_access,
-					 &arg,
-					 SATTR_SIZE | SATTR_TOUCH);
-}
-
+/* a helper which does the real work for
+ * a couple of handlers (such as chmod,
+ * ftruncate or utime)
+ */
 static int
 nfs_sattr(NfsNode node, sattr *arg, u_long mask)
 {
@@ -2411,7 +2733,7 @@ u_int					mode;
 
 	node->serporid.status = NFS_OK;
 
-	if ( nfscallSmall( node->nfs->server,
+	if ( nfscall( node->nfs->server,
 						NFSPROC_SETATTR,
 						xdr_sattrargs,	&SERP_FILE(node),
 						xdr_attrstat,	&node->serporid) ) {
@@ -2435,9 +2757,41 @@ u_int					mode;
 	return 0;
 }
 
+
+/* common for file/dir/link */
+static int nfs_fchmod(
+	rtems_filesystem_location_info_t *loc,
+	mode_t                            mode
+)
+{
+sattr	arg;
+
+	arg.mode = mode;
+	return nfs_sattr(loc->node_access, &arg, SATTR_MODE);
+	
+}
+
+/* just set the size attribute to 'length'
+ * the server will take care of the rest :-)
+ */
+static int nfs_file_ftruncate(
+	rtems_libio_t *iop,
+	off_t          length
+)
+{
+rtems_clock_time_value	now;
+sattr					arg;
+
+	arg.size = length;
+	return nfs_sattr(iop->pathinfo.node_access,
+					 &arg,
+					 SATTR_SIZE | SATTR_TOUCH);
+}
+
 #define nfs_dir_ftruncate 0
 #define nfs_link_ftruncate 0
 
+/* not implemented */
 #ifdef DECLARE_BODY
 static int nfs_file_fpathconf(
 	rtems_libio_t *iop,
@@ -2449,6 +2803,7 @@ static int nfs_file_fpathconf(
 #define nfs_link_fpathconf 0
 #endif
 
+/* unused */
 #ifdef DECLARE_BODY
 static int nfs_file_fsync(
 	rtems_libio_t *iop
@@ -2459,6 +2814,7 @@ static int nfs_file_fsync(
 #define nfs_link_fsync 0
 #endif
 
+/* unused */
 #ifdef DECLARE_BODY
 static int nfs_file_fdatasync(
 	rtems_libio_t *iop
@@ -2469,6 +2825,7 @@ static int nfs_file_fdatasync(
 #define nfs_link_fdatasync 0
 #endif
 
+/* unused */
 #ifdef DECLARE_BODY
 static int nfs_file_fcntl(
 	int            cmd,
@@ -2480,6 +2837,11 @@ static int nfs_file_fcntl(
 #define nfs_link_fcntl 0
 #endif
 
+/* files and symlinks are removed
+ * by the common nfs_unlink() routine.
+ * NFS has a different NFSPROC_RMDIR
+ * call, though...
+ */
 static int nfs_dir_rmnod(
 	rtems_filesystem_location_info_t      *pathloc       /* IN */
 )
@@ -2487,6 +2849,7 @@ static int nfs_dir_rmnod(
 	return nfs_do_unlink(pathloc, NFSPROC_RMDIR);
 }
 
+/* the file handlers table */
 static
 struct _rtems_filesystem_file_handlers_r nfs_file_file_handlers = {
 		nfs_file_open,			/* OPTIONAL; may be NULL */
@@ -2505,25 +2868,7 @@ struct _rtems_filesystem_file_handlers_r nfs_file_file_handlers = {
 		nfs_unlink,				/* OPTIONAL; may be NULL */
 };
 
-static
-struct _rtems_filesystem_file_handlers_r nfs_link_file_handlers = {
-		nfs_link_open,			/* OPTIONAL; may be NULL */
-		nfs_link_close,			/* OPTIONAL; may be NULL */
-		nfs_link_read,			/* OPTIONAL; may be NULL */
-		nfs_link_write,			/* OPTIONAL; may be NULL */
-		nfs_link_ioctl,			/* OPTIONAL; may be NULL */
-		nfs_link_lseek,			/* OPTIONAL; may be NULL */
-		nfs_fstat,				/* OPTIONAL; may be NULL */
-		nfs_fchmod,				/* OPTIONAL; may be NULL */
-		nfs_link_ftruncate,		/* OPTIONAL; may be NULL */
-		nfs_link_fpathconf,		/* OPTIONAL; may be NULL - UNUSED */
-		nfs_link_fsync,			/* OPTIONAL; may be NULL */
-		nfs_link_fdatasync,		/* OPTIONAL; may be NULL */
-		nfs_link_fcntl,			/* OPTIONAL; may be NULL */
-		nfs_unlink,				/* OPTIONAL; may be NULL */
-};
-
-
+/* the directory handlers table */
 static
 struct _rtems_filesystem_file_handlers_r nfs_dir_file_handlers = {
 		nfs_dir_open,			/* OPTIONAL; may be NULL */
@@ -2542,7 +2887,28 @@ struct _rtems_filesystem_file_handlers_r nfs_dir_file_handlers = {
 		nfs_dir_rmnod,				/* OPTIONAL; may be NULL */
 };
 
-/* we need a dummy table to get a major number from the system */
+/* the link handlers table */
+static
+struct _rtems_filesystem_file_handlers_r nfs_link_file_handlers = {
+		nfs_link_open,			/* OPTIONAL; may be NULL */
+		nfs_link_close,			/* OPTIONAL; may be NULL */
+		nfs_link_read,			/* OPTIONAL; may be NULL */
+		nfs_link_write,			/* OPTIONAL; may be NULL */
+		nfs_link_ioctl,			/* OPTIONAL; may be NULL */
+		nfs_link_lseek,			/* OPTIONAL; may be NULL */
+		nfs_fstat,				/* OPTIONAL; may be NULL */
+		nfs_fchmod,				/* OPTIONAL; may be NULL */
+		nfs_link_ftruncate,		/* OPTIONAL; may be NULL */
+		nfs_link_fpathconf,		/* OPTIONAL; may be NULL - UNUSED */
+		nfs_link_fsync,			/* OPTIONAL; may be NULL */
+		nfs_link_fdatasync,		/* OPTIONAL; may be NULL */
+		nfs_link_fcntl,			/* OPTIONAL; may be NULL */
+		nfs_unlink,				/* OPTIONAL; may be NULL */
+};
+
+/* we need a dummy driver entry table to get a
+ * major number from the system
+ */
 static
 rtems_device_driver nfs_initialize(
 		rtems_device_major_number	major,
@@ -2568,12 +2934,18 @@ static rtems_driver_address_table	drvNfs = {
 		0					/* control */
 };
 
-/* convenience wrapper */
+/* convenience wrapper
+ *
+ * NOTE: this routine calls NON-REENTRANT
+ *       gethostbyname() if the host is
+ *       not in 'dot' notation.
+ */
 int
 nfsMount(char *host, char *path, char *mntpoint)
 {
 rtems_filesystem_mount_table_entry_t	*mtab;
 struct stat								st;
+int										devl;
 int										rval = -1;
 char									*dev =  0;
 	if (!host || !path || !mntpoint) {
@@ -2581,7 +2953,7 @@ char									*dev =  0;
 		return -1;
 	}
 
-	if ( !(dev = malloc(20+strlen(path)+1)) ) {
+	if ( !(dev = malloc((devl=20+strlen(path)+1))) ) {
 		fprintf(stderr,"nfsMount: out of memory\n");
 		return -1;
 	}
@@ -2606,18 +2978,20 @@ char									*dev =  0;
 		 */
 /* BEGIN OF NON-THREAD SAFE REGION */
 		struct hostent *h = gethostbyname(host);
-		if (!h) {
+		if ( !h ||
+			 !inet_ntop( AF_INET,
+					     (struct in_addr*)h->h_addr_list[0],
+						 dev,
+						 devl )
+			) {
 			fprintf(stderr,"nfsMount: host '%s' not found\n",host);
 			goto cleanup;
 		}
-		/* since we are using non-safe gethostbyname,
-		 * we may as well use inet_ntoa()
-		 */
-		sprintf(dev,
-				"%s:%s",
-				inet_ntoa(*(struct in_addr *)h->h_addr_list[0]),
-				path);
 /* END OF NON-THREAD SAFE REGION */
+
+		/* append ':<path>' */
+		strcat(dev,":");
+		strcat(dev,path);
 	}
 
 	printf("Trying to mount %s on %s\n",dev,mntpoint);

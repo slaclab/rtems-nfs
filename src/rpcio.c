@@ -1,3 +1,20 @@
+/* $Id$ */
+
+/* RPC multiplexor for a multitasking environment */
+
+/* Author: Till Straumann <strauman@slac.stanford.edu>, 2002 */
+
+/* This code funnels arbitrary task's UDP/RPC requests
+ * through one socket to arbitrary servers.
+ * The replies are gathered and dispatched to the 
+ * requestors.
+ * One task handles all the sending and receiving
+ * work including retries.
+ * It is up to the requestor, however, to do
+ * the XDR encoding of the arguments / decoding
+ * of the results (except for the RPC header which
+ * is handled by the daemon).
+ */
 
 #ifdef __rtems
 #include <rtems.h>
@@ -47,11 +64,16 @@ typedef	rtems_interval		TimeoutT;
 typedef struct timeval		TimeoutT;
 #endif
 
+/* 100000th implementation of a doubly linked list;
+ * since only one thread is looking at these,
+ * we need no locking
+ */
 typedef struct ListNodeRec_ {
 	struct ListNodeRec_ *next, *prev;
 } ListNodeRec, *ListNode;
 
 
+/* Structure representing an RPC server */
 typedef struct RpcUdpServerRec_ {
 		struct sockaddr_in	addr;
 		AUTH				*auth;
@@ -63,6 +85,10 @@ typedef union  RpcBufU_ {
 		char				buf[1];
 } RpcBufU, *RpcBuf;
 
+/* A RPC 'transaction' consisting
+ * of server and requestor information,
+ * buffer space and an XDR object
+ */
 typedef struct RpcUdpXactRec_ {
 		ListNodeRec			node;
 		RpcUdpServer		server;
@@ -105,6 +131,7 @@ static rtems_interval	ticksPerSec;
 static void rpcio_daemon(rtems_task_argument);
 #endif
 
+#ifdef DEBUG
 static int nibufs = 0;
 
 static inline void *MALLOC(int s)
@@ -129,7 +156,14 @@ static inline void FREE(void *p)
 		free(p);
 	}
 }
+#else
+#define MALLOC	malloc
+#define FREE	free
+#endif
 
+/* Create a server object
+ *
+ */
 RpcUdpServer
 rpcUdpServerCreate(
 	struct sockaddr_in	*paddr,
@@ -261,6 +295,9 @@ int i = xact->obuf.xid & XACT_HASH_MSK;
 
 
 
+/* Send a transaction, i.e. enqueue it to the
+ * RPC daemon who will actually send it.
+ */
 enum clnt_stat
 rpcUdpSend(
 	RpcUdpXact		xact,
@@ -323,6 +360,11 @@ va_list			ap;
 	return RPC_SUCCESS;
 }
 
+/* Block for the RPC reply to an outstanding
+ * transaction.
+ * The caller is woken by the RPC daemon either
+ * upon reception of the reply or on timeout.
+ */
 enum clnt_stat
 rpcUdpRcv(RpcUdpXact xact)
 {
@@ -378,6 +420,7 @@ rtems_event_set		gotEvents;
 	return xact->status.re_status;
 }
 
+/* sent from the socket */
 static enum clnt_stat
 sockSnd(RpcUdpXact xact)
 {
@@ -394,6 +437,11 @@ int len = (int)XDR_GETPOS(&xact->xdrs);
 	return RPC_SUCCESS;
 }
 
+/* receive from a socket and find
+ * the transaction corresponding to the
+ * transaction ID received in the server
+ * reply.
+ */
 static RpcUdpXact
 sockRcv(RpcBuf *pibuf, int ibufsize)
 {
@@ -435,6 +483,9 @@ cleanup:
 
 
 #ifdef __rtems
+/* On RTEMS, I'm told to avoid select(); this seems to
+ * be more efficient
+ */
 static void
 rxWakeupCB(struct socket *sock, caddr_t arg)
 {
@@ -495,6 +546,17 @@ struct sockwakeup	wkup;
 	return 0;
 }
 
+/* Another API - simpler but less efficient.
+ * For each RPCall, a server and a Xact
+ * are created and destroyed on the fly.
+ *
+ * This should be used for infrequent calls
+ * (e.g. a NFS mount request).
+ *
+ * This is roughly compatible with the original
+ * clnt_call() etc. API - but it uses our
+ * daemon and is fully reentrant.
+ */
 RpcUdpClnt
 rpcUdpClntCreate(
 		struct sockaddr_in *psaddr,
@@ -583,6 +645,7 @@ RpcBuf			buf = 0;
 
 #ifdef __rtems
 
+/* linked list primitives */
 static void
 nodeXtract(ListNode n)
 {
@@ -603,6 +666,7 @@ nodeAppend(ListNode l, ListNode n)
 	
 }
 
+/* this code does the work */
 static void
 rpcio_daemon(rtems_task_argument arg)
 {
@@ -813,6 +877,7 @@ RpcBuf			 buf = 0;
 	rtems_task_suspend(RTEMS_SELF);
 }
 
+/* CEXP module support (magic init) */
 _cexpModuleInitialize(void *mod)
 {
 	rpcUdpInit();
@@ -836,6 +901,16 @@ _cexpModuleFinalize(void *mod)
 	rtems_semaphore_delete(fini);
 	return (msgQ !=0);
 }
+
+
+/* support for transaction 'pools'. A number of XACT objects
+ * is always kept around. The initial number is 0 but it
+ * is allowed to grow up to a maximum.
+ * If the need grows beyond the maximum, behavior depends:
+ * Users can either block until a transaction becomes available,
+ * they can create a new XACT on the fly or get an error
+ * if no free XACT is available from the pool.
+ */
 
 RpcUdpXactPool
 rpcUdpXactPoolCreate(
