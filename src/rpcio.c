@@ -4,6 +4,7 @@
 #endif
 #include <stdlib.h>
 #include <rpc/rpc.h>
+#include <rpc/pmap_prot.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <assert.h>
@@ -49,11 +50,11 @@ typedef struct ListNodeRec_ {
 } ListNodeRec, *ListNode;
 
 
-typedef struct RpcServerRec_ {
+typedef struct RpcUdpServerRec_ {
 		struct sockaddr_in	addr;
 		AUTH				*auth;
 		TimeoutT			retry_period;
-} RpcServerRec;
+} RpcUdpServerRec;
 
 typedef union  RpcBufU_ {
 		u_long				xid;
@@ -62,7 +63,7 @@ typedef union  RpcBufU_ {
 
 typedef struct RpcUdpXactRec_ {
 		ListNodeRec			node;
-		RpcServer			server;
+		RpcUdpServer		server;
 		long				retrans;
 		struct rpc_err		status;
 #ifdef __rtems
@@ -103,30 +104,42 @@ static rtems_interval	ticksPerSec;
 static void rpcio_daemon(rtems_task_argument);
 #endif
 
-RpcServer
-rpcServerCreate(struct sockaddr_in *paddr, struct timeval retry_period)
+RpcUdpServer
+rpcUdpServerCreate(
+	struct sockaddr_in	*paddr,
+	int					prog,
+	int					vers,
+	struct timeval		retry_period)
 {
-RpcServer	rval;
-u_short		port;
+RpcUdpServer	rval;
+u_short			port;
+
+	if (!paddr->sin_port) {
+		paddr->sin_port = htons(PMAPPORT);
+		port            = pmap_getport(paddr, prog, vers ,IPPROTO_UDP);
+		paddr->sin_port = htons(port);
+	}
+
 	if (0==paddr->sin_port) {
 			return 0;
 	} 
-	rval       			= (RpcServer)malloc(sizeof(*rval));
+
+	rval       			= (RpcUdpServer)malloc(sizeof(*rval));
 	rval->addr 			= *paddr;
-#ifdef __rtems
+
 	rval->retry_period  = retry_period.tv_usec * ticksPerSec / 1000000;
 	rval->retry_period += retry_period.tv_sec * ticksPerSec; 
-#else
-	rval->retry_period	= retry_period;
-#endif
+
 	rval->auth 			= authunix_create_default();
 	return rval;
 }
 
 /* make sure no outstanding XACT references this server */
 void
-rpcServerDestroy(RpcServer s)
+rpcUdpServerDestroy(RpcUdpServer s)
 {
+	if (!s)
+		return;
 	auth_destroy(s->auth);
 	free(s);
 }
@@ -220,7 +233,7 @@ fprintf(stderr,"TSILL removing index %i, val %x\n",i,xact);
 enum clnt_stat
 rpcUdpSend(
 	RpcUdpXact		xact,
-	RpcServer		srvr,
+	RpcUdpServer	srvr,
 	struct timeval	timeout,
 	u_long			proc,
 	xdrproc_t		xres, caddr_t pres,
@@ -322,10 +335,11 @@ rtems_event_set		gotEvents;
 			XDR_DESTROY(&reply_xdrs);
 			return RPC_SUCCESS;
 		}
+	} else {
+		xact->status.re_status = RPC_CANTDECODERES;
 	}
 	reply_xdrs.x_op = XDR_FREE;
 	xdr_replymsg(&reply_xdrs, &reply_msg);
-	xact->status.re_status = RPC_CANTDECODERES;
 	XDR_DESTROY(&reply_xdrs);
 
 	free(xact->ibuf);
@@ -457,18 +471,27 @@ rpcUdpClntCreate(
 		int					vers,
 		struct timeval		retry_timeout)
 {
-RpcUdpXact	xact;
-	if (!(xact=rpcUdpXactCreate(prog, vers, UDPMSGSIZE)))
+RpcUdpXact		x;
+RpcUdpServer	s;
+
+	if ( !(s = rpcUdpServerCreate(psaddr, prog, vers, retry_timeout)) )
 		return 0;
+
+	if ( !(x=rpcUdpXactCreate(prog, vers, UDPMSGSIZE)) ) {
+		rpcUdpServerDestroy(s);
+		return 0;
+	}
 	/* TODO: could maintain a server cache */
-	xact->server = rpcServerCreate(psaddr, retry_timeout);
-	return xact;
+
+	x->server = s;
+
+	return x;
 }
 
 enum clnt_stat
 rpcUdpClntDestroy(RpcUdpClnt xact)
 {
-	rpcServerDestroy(xact->server);
+	rpcUdpServerDestroy(xact->server);
 	rpcUdpXactDestroy(xact);
 }
 
@@ -758,7 +781,9 @@ _cexpModuleFinalize(void *mod)
 	/* synchronize with daemon */
 	rtems_semaphore_obtain(fini, RTEMS_WAIT, 5*ticksPerSec);
 	/* if the message queue is still there, something went wrong */
-	rtems_task_delete(rpciod);
+	if (!msgQ) {
+		rtems_task_delete(rpciod);
+	}
 	rtems_semaphore_delete(fini);
 	return (msgQ !=0);
 }
@@ -778,6 +803,8 @@ RpcUdpXactPool	rval = malloc(sizeof(*rval));
 									sizeof(RpcUdpXact),
 									RTEMS_DEFAULT_ATTRIBUTES,
 									&rval->box) );
+	rval->prog     = prog;
+	rval->version  = version;
 	rval->xactSize = xactsize;
 	return rval;
 }

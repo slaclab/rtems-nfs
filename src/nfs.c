@@ -1,11 +1,13 @@
 #include <rtems.h>
 #include <rtems/libio.h>
+#include <rtems/libio_.h>
 #include <rtems/seterr.h>
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
 
 #include <nfs_prot.h>
+#include <mount_prot.h>
 
 #include "rpcio.h"
 
@@ -16,18 +18,40 @@
 #endif
 
 #define DELIM							'/'
+#define HOSTDELIM						':'
+#define UPDIR							".."
 #define NFS_VERSION_2					NFS_VERSION
 
 #define CONFIG_NFS_BIG_XACT_SIZE		UDPMSGSIZE
 #define CONFIG_NFS_SMALL_XACT_SIZE		UDPMSGSIZE
 #define NFSCALL_TIMEOUT					_nfscalltimeout
+#define MNTCALL_TIMEOUT					_nfscalltimeout
 #define NFSCALL_RETRYPERIOD				_nfscallretry
+#define MNTCALL_RETRYPERIOD				_nfscallretry
 
 #undef  TSILLDEBUG
 #define STATIC
 
 static struct timeval _nfscalltimeout = { 10, 0 };
 static struct timeval _nfscallretry   = { 1,  0 };
+
+/* These are (except for MAXNAMLEN/MAXPATHLEN) copied from IMFS */
+
+static rtems_filesystem_limits_and_options_t nfs_limits_and_options = {
+   5, 				/* link_max */
+   6, 				/* max_canon */
+   7, 				/* max_input */
+   NFS_MAXNAMLEN,	/* name_max */
+   NFS_MAXPATHLEN,	/* path_max */
+   2,				/* pipe_buf */
+   1,				/* posix_async_io */
+   2,				/* posix_chown_restrictions */
+   3,				/* posix_no_trunc */
+   4,				/* posix_prio_io */
+   5,				/* posix_sync_io */
+   6				/* posix_vdisable */
+};
+
 
 /* 'time()' hack with less overhead;
  * 
@@ -166,7 +190,7 @@ typedef struct NfsNodeRec_ {
 
 /* Per mounted FS structure */
 typedef struct NfsRec_ {
-	RpcServer	server;
+	RpcUdpServer	server;
 } NfsRec, *Nfs;
 
 #define SERP_ARGS(node) ((node)->serporid.serporid_u.serporid.arg_u)
@@ -174,37 +198,40 @@ typedef struct NfsRec_ {
 #define SERP_FILE(node) ((node)->serporid.serporid_u.serporid.file)
 
 #ifndef TSILLDEBUG
-NfsNodeRec	dbgRoot;
-nfs_fh		*dbgFhP = &SERP_FILE(&dbgRoot);
-Nfs			dbgNfs;
+NfsNode		 dbgRoot=0;
+RpcUdpServer dbgSrv=0;
 #endif
 
 static RpcUdpXactPool smallPool = 0;
 static RpcUdpXactPool bigPool   = 0;
 
+extern struct _rtems_filesystem_operations_table nfs_fs_ops;
+
 Nfs
-nfsCreate(struct sockaddr_in *psa)
+nfsCreate(RpcUdpServer server)
 {
 Nfs rval = malloc(sizeof(*rval));
 
 	if (rval)
-		rval->server = rpcServerCreate(
-							psa,
-							NFSCALL_RETRYPERIOD);
+		rval->server = server;
 	return rval;
 }
 
 void
 nfsDestroy(Nfs nfs)
 {
-	rpcServerDestroy(nfs->server);
+	if (!nfs)
+		return;
+	rpcUdpServerDestroy(nfs->server);
 	free(nfs);
 }
 
 static NfsNode
-nfsNodeAlloc(void)
+nfsNodeCreate(void)
 {
 NfsNode	rval = malloc(sizeof(*rval));
+
+fprintf(stderr,"TSILL creating a node\n");
 
 	return rval;
 }
@@ -216,8 +243,9 @@ NfsNode	rval = malloc(sizeof(*rval));
  */
 
 static void
-nfsNodeFree(NfsNode node)
+nfsNodeDestroy(NfsNode node)
 {
+fprintf(stderr,"TSILL destroying a node\n");
 #if 0
 	if (!node)
 		return;
@@ -231,10 +259,6 @@ nfsNodeFree(NfsNode node)
 void
 nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
-#ifndef TSILLDEBUG
-	extern struct sockaddr_in dbg_server;
-	dbgNfs = nfsCreate(&dbg_server);
-#endif
 	if (0==smallPoolDepth)
 		smallPoolDepth = 20;
 	if (0==bigPoolDepth)
@@ -251,15 +275,11 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 							NFS_VERSION_2,
 							CONFIG_NFS_BIG_XACT_SIZE,
 							bigPoolDepth) );
-
 }
 
 void
 nfsCleanup(void)
 {
-#ifndef TSILLDEBUG
-	nfsDestroy(dbgNfs);
-#endif
 	rpcUdpXactPoolDestroy(smallPool);
 	rpcUdpXactPoolDestroy(bigPool);
 }
@@ -290,19 +310,14 @@ struct rtems_filesystem_location_info_tt
  */
 
 
-/*
- * rtems_filesystem_freenode_t must be called by the generic after
- * calling this routine
- */
-
 int
 nfscallSmall(
-	RpcServer	srvr,
-	int			proc,
-	xdrproc_t	xargs,
-	void *		pargs,
-	xdrproc_t	xres,
-	void *		pres)
+	RpcUdpServer	srvr,
+	int				proc,
+	xdrproc_t		xargs,
+	void *			pargs,
+	xdrproc_t		xres,
+	void *			pres)
 {
 RpcUdpXact		xact;
 enum clnt_stat	stat;
@@ -320,7 +335,9 @@ int				rval=-1;
 								xargs,
 								pargs,
 								0)) ||
-	     RPC_SUCCESS != (stat=rpcUdpRcv(xact)) ){
+	     RPC_SUCCESS != (stat=rpcUdpRcv(xact)) ) {
+
+		fprintf(stderr,"NFS - %s\n",clnt_sperrno(stat));
 
 		switch (stat) {
 			/* TODO: this is probably not complete and/or fully accurate */
@@ -334,9 +351,7 @@ int				rval=-1;
 			default             	: errno = EIO;		break;
 		}
 	} else {
-		if (NFS_OK == (errno=*(nfsstat*)pres)) {
-			rval = 0;
-		}
+		rval = 0;
 	}
 
 	/* release the transaction back into the pool */
@@ -345,6 +360,95 @@ int				rval=-1;
 	return rval;
 }
 
+/* initialize a sockaddr_in from a
+ * "<host>':'<path>" string and let
+ * pPath point to the <path> part
+ *
+ * RETURNS: 0 on success, -1 on failure with errno set
+ */
+static int
+buildIpAddr(char **pPath, struct sockaddr_in *psa)
+{
+char	host[30];
+char	*chpt = *pPath;
+char	*path;
+int		len;
+
+	/* split the device name which is in the form
+	 *
+	 * <host_ip> ':' <path>
+	 *
+	 * into its components using a local buffer
+	 */
+
+	if ( !(chpt) ||
+		 !(path = strchr(chpt, HOSTDELIM)) ||
+	      (len  = path - chpt) >= sizeof(host) - 1 ) {
+		errno = EINVAL;
+		return -1;
+	}
+	/* point to path beyond ':' */
+	path++;
+
+	strncpy(host, chpt, len);
+	host[len]=0;
+
+	if ( ! inet_aton(host, &psa->sin_addr) ) {
+		errno = ENXIO;
+		return -1;
+	}
+
+	psa->sin_family = AF_INET;
+	psa->sin_port   = 0;
+	*pPath   = path;
+	return 0;
+}
+
+enum clnt_stat
+mntcall(
+	struct sockaddr_in	*psrvr,
+	int					proc,
+	xdrproc_t			xargs,
+	void *				pargs,
+	xdrproc_t			xres,
+	void *				pres)
+{
+RpcUdpClnt			clp;
+int					retry;
+enum clnt_stat		stat;
+
+#ifdef MOUNT_V1_PORT
+	/* if the portmapper fails, retry a fixed port */
+	for (retry = 1, clp = 0;
+		 retry >= 0 && !clp;
+		 saddr.sin_port = htons(MOUNT_V1_PORT), retry-- )
+#endif
+		clp  = rpcUdpClntCreate(
+				psrvr,
+				MOUNT_PROGRAM,
+				MOUNT_V1,
+				MNTCALL_RETRYPERIOD);
+
+	if (!clp) {
+		fprintf(stderr,
+				"Unable to create MOUNT client - invalid server/port?\n");
+		return RPC_UNKNOWNPROTO;
+	}
+
+	stat = rpcUdpClntCall(
+					clp,
+					proc,
+					xargs, pargs,
+					xres,  pres,
+					MNTCALL_TIMEOUT);
+
+	rpcUdpClntDestroy(clp);
+
+	return stat;
+}
+	
+
+#if 0
 int
 lk1(char *name)
 {
@@ -355,7 +459,7 @@ extern diropargs dbg_diropargs;
 
 
 	dbg_diropargs.name=name;
-	if (nfscallSmall(dbgNfs->server,
+	if (nfscallSmall(dbgSrv,
 				NFSPROC_LOOKUP,
 				xdr_diropargs, &dbg_diropargs,
 				xdr_diropres,  &res
@@ -383,6 +487,23 @@ cleanup:
 	xdr_free(xdr_diropres,(void*)&res);
 
 }
+#endif
+
+/*
+ * rtems_filesystem_freenode_t must be called by the generic after
+ * calling this routine
+ */
+
+static inline int
+locIsRoot(rtems_filesystem_location_info_t *l)
+{
+NfsNode me = (NfsNode) l->node_access;
+NfsNode r;
+	r = (NfsNode)l->mt_entry->mt_fs_root.node_access;
+	return SERP_ATTR(r).fileid == SERP_ATTR(me).fileid &&
+		   SERP_ATTR(r).rdev   == SERP_ATTR(me).rdev;
+}
+
 
 STATIC int nfs_evalpath(
 	const char                        *pathname,      /* IN     */
@@ -390,66 +511,95 @@ STATIC int nfs_evalpath(
 	rtems_filesystem_location_info_t  *pathloc        /* IN/OUT */
 )
 {
-char		*p = strdup(pathname);
-char		*del, *part;
-NfsNode		node=nfsNodeAlloc();
-int			e;
-#ifndef TSILLDEBUG
-#warning TSILLDEBUG still unset
-RpcServer	server = dbgNfs->server;
-#else
-RpcServer	server = ((Nfs)pathloc->mt_entry->fs_info)->server;
-#endif
+char			*p = strdup(pathname);
+char			*del, *part;
+NfsNode			node=nfsNodeCreate();
+int				e;
+RpcUdpServer	server = ((Nfs)pathloc->mt_entry->fs_info)->server;
 
 	if (!p || !node) {
 		e = ENOMEM;
-		goto bailout;
+		goto cleanup;
 	}
 
-#ifndef TSILLDEBUG
 	/* copy the start node */
-	memcpy(node, pathloc, sizeof(*node));
-#else
 	memcpy(node, pathloc->node_access, sizeof(*node));
-#endif
+	pathloc->node_access = node;
 
-	for (part=p; p && *p; p=del) {
+	for (part=p; part && *part; part=del) {
 		/* find delimiter and eat /// sequences */
-		if ((del = strchr(p, DELIM))) {
+		if ((del = strchr(part, DELIM))) {
 			do {
 				*del++=0;
 			} while (DELIM==*del);
 		}
 
-		/* lookup one element */
-		SERP_ARGS(node).diroparg.name = p;
+		/* cross mountpoint upwards */
+		if (0==strcmp(part,UPDIR) && locIsRoot(pathloc)) {
 
+			rtems_filesystem_location_info_t *mp_node;
+
+			mp_node = &pathloc->mt_entry->mt_point_node;
+
+			nfsNodeDestroy(node);
+
+			*pathloc = *mp_node;
+
+			return mp_node->ops->evalpath_h(part, flags, mp_node);
+		}
+
+		/* lookup one element */
+		SERP_ARGS(node).diroparg.name = part;
+
+fprintf(stderr,"Looking up '%s'\n",part);
 		if (nfscallSmall(server,
 						 NFSPROC_LOOKUP,
 						 xdr_diropargs,
 						 &SERP_FILE(node),
 						 xdr_serporid,
 						 &node->serporid)) {
-			e = errno;
-			goto bailout;
+fprintf(stderr,"Errout \n");
+			e = errno ? errno : EIO;
+			goto cleanup;
+		} else {
+			if (e = node->serporid.status)
+				goto cleanup;
 		}
+		
 	}
 
-	free(p);
 #ifndef TSILLDEBUG
 	fprintf(stderr,"Type %i, ino %i\n",
 					SERP_ATTR(node).type,
 					SERP_ATTR(node).fileid);
-	nfsNodeFree(node);
 #endif
 
-	pathloc->node_access = node;
-	return 0;
+	if (locIsRoot(pathloc)) {
+		/* stupid filesystem code has no 'op' for comparing nodes
+		 * but just compares the 'node_access' pointers.
+		 * Luckily, this is only done for comparing the root nodes.
+		 * Hence, we never give them a copy of the root but always
+		 * the root itself.
+		 */
+		pathloc->node_access = pathloc->mt_entry->mt_fs_root.node_access;
+		nfsNodeDestroy(node);
+	} else {
+		pathloc->node_access = node;
+	}
+	node = 0;
 
-bailout:
+	e = 0;
+
+cleanup:
 	free(p);
-	nfsNodeFree(node);
-	rtems_set_errno_and_return_minus_one(e);
+	if (node) {
+		nfsNodeDestroy(node);
+		pathloc->node_access = 0;
+	}
+	if (e)
+		rtems_set_errno_and_return_minus_one(e);
+	else
+		return 0;
 }
 
 /* MANDATORY; may set errno=ENOSYS and return -1 */
@@ -494,14 +644,21 @@ static int nfs_chown(
 #define nfs_chown 0
 #endif
 
-#ifdef DECLARE_BODY
 /* Cleanup the FS private info attached to pathloc->node_access */
 static int nfs_freenode(
 	rtems_filesystem_location_info_t      *pathloc       /* IN */
-)DECLARE_BODY
-#else
-#define nfs_freenode 0
-#endif
+)
+{
+
+	/* never destroy the root node; it is released by the unmount
+	 * code
+	 */
+	if (locIsRoot(pathloc))
+		return 0;
+	nfsNodeDestroy(pathloc->node_access);
+	pathloc->node_access = 0;
+	return 0;
+}
 
 #ifdef DECLARE_BODY
 /* This routine is called when they try to mount something
@@ -515,14 +672,167 @@ static int nfs_mount(
 #define nfs_mount 0
 #endif
 
-#ifdef DECLARE_BODY
-/* This op is called as the last step of mounting this FS */
-static int nfs_fsmount_me(
-	rtems_filesystem_mount_table_entry_t *mt_entry
-)DECLARE_BODY
-#else
-#define nfs_fsmount_me 0
+#if 0
+
+/* for reference (libio.h) */
+
+struct rtems_filesystem_mount_table_entry_tt {
+  Chain_Node                             Node;
+  rtems_filesystem_location_info_t       mt_point_node;
+  rtems_filesystem_location_info_t       mt_fs_root;
+  int                                    options;
+  void                                  *fs_info;
+
+  rtems_filesystem_limits_and_options_t  pathconf_limits_and_options;
+
+  /*
+   *  When someone adds a mounted filesystem on a real device,
+   *  this will need to be used.
+   *
+   *  The best option long term for this is probably an open file descriptor.
+   */
+  char                                  *dev;
+};
 #endif
+
+
+/* This op is called as the last step of mounting this FS */
+STATIC int nfs_fsmount_me(
+	rtems_filesystem_mount_table_entry_t *mt_entry
+)
+{
+char				*host;
+int					retry;
+struct sockaddr_in	saddr;
+enum clnt_stat		stat;
+fhstatus			fhstat;
+Nfs					nfs       = 0;
+NfsNode				rootNode  = 0;
+RpcUdpServer		nfsServer = 0;
+int					e         = -1;
+char				*path     = mt_entry->dev;
+
+
+	host = path;
+	if (buildIpAddr(&path, &saddr))
+		return -1;
+
+
+#ifdef NFS_V2_PORT
+	/* if the portmapper fails, retry a fixed port */
+	for (retry = 1;
+		 retry >= 0 && !nfsServer;
+		 saddr.sin_port = htons(NFS_V2_PORT), retry-- )
+#endif
+		nfsServer = rpcUdpServerCreate(
+							&saddr,
+							NFS_PROGRAM,
+							NFS_VERSION_2,
+							NFSCALL_RETRYPERIOD);
+
+	if ( !nfsServer ) {
+		fprintf(stderr,
+				"Unable to contact NFS server - invalid port?\n");
+		e = EPROTONOSUPPORT;
+		goto cleanup;
+	}
+
+	/* first, try to ping the NFS server by
+	 * calling the NULL proc.
+	 */
+	if (nfscallSmall(nfsServer,
+					 NFSPROC_NULL,
+					 xdr_void, 0,
+					 xdr_void, 0)) {
+
+		fputs("NFS Ping ",stderr);
+		fwrite(host, 1, path-host-1, stderr);
+		fprintf(stderr," failed: %s\n", strerror(errno));
+
+		e = errno ? errno : EIO;
+		goto cleanup;
+	}
+
+
+	/* that seemed to work - we now try the
+	 * actual mount
+	 */
+
+	/* reuse server address but let the mntcall()
+	 * search for the mountd's port
+	 */
+	saddr.sin_port = 0;
+
+	stat = mntcall( &saddr,
+					MOUNTPROC_MNT,
+					xdr_dirpath,
+					&path,
+					xdr_fhstatus,
+					&fhstat );
+
+	if (stat) {
+		fprintf(stderr,"MOUNT -- %s\n",clnt_sperrno(stat));
+		if ( e<=0 )
+			e = EIO;
+		goto cleanup;
+	} else if (NFS_OK != (e=fhstat.fhs_status)) {
+		fprintf(stderr,"MOUNT: %s\n",strerror(e));
+		goto cleanup;
+	}
+
+	/* that seemed to work - we now create the root node
+	 * and we also must obtain the root node attributes
+	 */
+	assert( rootNode = nfsNodeCreate() );
+
+	if ( nfscallSmall(  nfsServer,
+						NFSPROC_GETATTR,
+						xdr_nfs_fh,   &fhstat.fhstatus_u.fhs_fhandle,
+						xdr_attrstat, &rootNode->serporid) ) {
+		e = errno ? errno : EIO;
+		goto cleanup;
+	} else if ( e = rootNode->serporid.status )
+		goto cleanup;
+
+	/* looks good so far; now copy the file handle */
+	memcpy( &SERP_FILE(rootNode),
+			&fhstat.fhstatus_u.fhs_fhandle,
+			sizeof(SERP_FILE(rootNode)) );
+
+#ifndef TSILLDEBUG
+	dbgSrv = nfsServer;
+#endif
+
+	assert( nfs = nfsCreate(nfsServer) );
+	nfsServer = 0;
+
+#ifndef TSILLDEBUG
+	dbgRoot = rootNode;
+#endif
+	mt_entry->mt_fs_root.node_access = rootNode;
+
+	rootNode = 0;
+
+	mt_entry->mt_fs_root.ops		 = &nfs_fs_ops;
+	mt_entry->mt_fs_root.handlers	 = &rtems_filesystem_null_handlers;
+	mt_entry->pathconf_limits_and_options = nfs_limits_and_options;
+	mt_entry->fs_info				 = nfs;
+	nfs = 0;
+
+	e = 0;
+
+cleanup:
+	if (nfs)
+		nfsDestroy(nfs);
+	if (nfsServer)
+		rpcUdpServerDestroy(nfsServer);
+	if (rootNode)
+		nfsNodeDestroy(rootNode);
+	if (e)
+		rtems_set_errno_and_return_minus_one(e);
+	else
+		return 0;
+}
 
 #ifdef DECLARE_BODY
 /* This op is called when they try to unmount a FS
@@ -535,25 +845,65 @@ static int nfs_unmount(
 #define nfs_unmount 0
 #endif
 
-#ifdef DECLARE_BODY
 /* This op is called when they try to unmount THIS fs */
-static int nfs_fsunmount_me(
+STATIC int nfs_fsunmount_me(
 	rtems_filesystem_mount_table_entry_t *mt_entry    /* in */
-)DECLARE_BODY
-#else
-#define nfs_fsunmount_me 0
-#endif
+)
+{
+enum clnt_stat		stat;
+struct sockaddr_in	saddr;
+char				*path = mt_entry->dev;
 
-#ifdef DECLARE_BODY
+	assert( buildIpAddr(&path,&saddr) );
+	
+	stat = mntcall( &saddr,
+					MOUNTPROC_UMNT,
+					xdr_dirpath, &path,
+					xdr_void,	 0 );
+
+	if (stat) {
+		fprintf(stderr,"NFS UMOUNT -- %s\n", clnt_sperrno(stat));
+		errno = EIO;
+		return -1;
+	}
+
+	nfsNodeDestroy(mt_entry->mt_fs_root.node_access);
+	mt_entry->mt_fs_root.node_access = 0;
+	
+	nfsDestroy(mt_entry->fs_info);
+	mt_entry->fs_info = 0;
+	return 0;
+}
+
 /* OPTIONAL; may be NULL - BUT: CAUTION; mount() doesn't check
  * for this handler to be present - a fs bug
  */
 static rtems_filesystem_node_types_t nfs_node_type(
 	rtems_filesystem_location_info_t    *pathloc      /* in */
-)DECLARE_BODY
-#else
-#define nfs_node_type 0
-#endif
+)
+{
+NfsNode node = pathloc->node_access;
+	switch( SERP_ATTR(node).type ) {
+		default:
+			/* rtems has no value for 'unknown';
+			 */
+		case NFNON:
+		case NFSOCK:
+		case NFBAD:
+		case NFFIFO:
+				break;
+
+
+		case NFREG: return RTEMS_FILESYSTEM_MEMORY_FILE;
+		case NFDIR:	return RTEMS_FILESYSTEM_DIRECTORY;
+
+		case NFBLK:
+		case NFCHR:	return RTEMS_FILESYSTEM_DEVICE;
+
+		case NFLNK: return RTEMS_FILESYSTEM_SYM_LINK;
+	}
+	return -1;
+}
 
 #ifdef DECLARE_BODY
 /* OPTIONAL; may be NULL */
@@ -606,7 +956,6 @@ static int nfs_readlink(
 #define nfs_readlink 0
 #endif
 
-static
 struct _rtems_filesystem_operations_table nfs_fs_ops = {
 		nfs_evalpath,		/* MANDATORY */
 		nfs_evalformake,	/* MANDATORY; may set errno=ENOSYS and return -1 */

@@ -21,7 +21,7 @@ m: mnt.o rpcio.o
 %.o: %.c
 	$(CC) -c -o $@ $(CFLAGS) $^
 
-m.obj: mnt.o rpcio.o nfs.o
+m.obj: rpcio.o nfs.o
 	$(LD) -o $@ -r $^
 
 clean:

@@ -10,24 +10,26 @@
 #include <sys/ioctl.h>
 #include <stdarg.h>
 
-typedef struct RpcServerRec_ 	*RpcServer;
-typedef struct RpcUdpXactRec_	*RpcUdpXact;
+typedef struct RpcUdpServerRec_ 	*RpcUdpServer;
+typedef struct RpcUdpXactRec_		*RpcUdpXact;
 
-typedef RpcUdpXact				RpcUdpClnt;
+typedef RpcUdpXact					RpcUdpClnt;
 
 
 int
 rpcUdpInit(void);
 
-RpcServer
-rpcServerCreate(
+RpcUdpServer
+rpcUdpServerCreate(
 	struct sockaddr_in *paddr,
+	int					prog,
+	int					vers,
 	struct timeval		retry_period
 	);
 
 
 void
-rpcServerDestroy(RpcServer s);
+rpcUdpServerDestroy(RpcUdpServer s);
 
 RpcUdpClnt
 rpcUdpClntCreate(
@@ -70,7 +72,7 @@ rpcUdpXactDestroy(
 enum clnt_stat
 rpcUdpSend(
 	RpcUdpXact		xact,
-	RpcServer		srvr,
+	RpcUdpServer	srvr,
 	struct timeval	timeout,
 	u_long			proc,
 	xdrproc_t		xres,
