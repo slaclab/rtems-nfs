@@ -75,8 +75,8 @@ LDFLAGS   +=
 #CLEAN_ADDITIONS += xxx-your-debris-goes-here
 CLOBBER_ADDITIONS +=
 
-ifndef INSTALLDIR
-INSTALLDIR = $(PROJECT_RELEASE)
+ifndef RTEMS_SITE_INSTALLDIR
+RTEMS_SITE_INSTALLDIR = $(PROJECT_RELEASE)
 endif
 
 %nfs.obj: %nfs.o
@@ -96,5 +96,5 @@ all:	${ARCH} $(SRCS) $(PGMS) $(LIB)
 # Install the program(s), appending _g or _p as appropriate.
 # for include files, just use $(INSTALL_CHANGE)
 install:  all
-	$(INSTALL_VARIANT) -m 555 ${PGMS} ${INSTALLDIR}/bin
-	$(INSTALL_VARIANT) -m 555 ${LIB}  ${INSTALLDIR}/lib
+	$(INSTALL_VARIANT) -m 555 ${PGMS} ${RTEMS_SITE_INSTALLDIR}/bin
+	$(INSTALL_VARIANT) -m 555 ${LIB}  ${RTEMS_SITE_INSTALLDIR}/lib

@@ -970,6 +970,11 @@ rtems_id	l;
 int			refuse;
 Nfs			nfs;
 
+	if (!nfsGlob.lock) {
+		/* registering the driver failed - let them still cleanup */
+		return 0;
+	}
+
 	LOCK(nfsGlob.lock);
 	if ( (refuse = nfsGlob.num_mounted_fs) ) {
 		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted:\n",

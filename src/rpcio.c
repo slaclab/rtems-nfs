@@ -140,7 +140,7 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define DEBUG_MALLOC		(1<<2)
 #define DEBUG_TIMEOUT		(1<<3)
 
-/* USE PARENTESIS WHEN 'or'ing MULTIPLE FLAGS: (DEBUG_XX | DEBUG_YY) */
+/* USE PARENTHESIS WHEN 'or'ing MULTIPLE FLAGS: (DEBUG_XX | DEBUG_YY) */
 #define DEBUG				0
 
 /****************************************************************/
@@ -1582,8 +1582,13 @@ RpcUdpXact			xact     = 0;
 
 	i = (xid=XID(ibuf)) & XACT_HASH_MSK;
 
-	if ( !(xact=xactHashTbl[i])   ||
-		   xact->obuf.xid                     != xid						|| 
+	if ( !(xact=xactHashTbl[i])                                             ||
+		   (     xact->obuf.xid               != xid
+#ifndef DEBUG
+			/* don't complain if it's just a late arrival of a retry */
+			  && xact->obuf.xid               != xid + XACT_HASHS
+#endif
+		   )                                                                ||
 		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
 		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
 
@@ -1599,7 +1604,7 @@ RpcUdpXact			xact     = 0;
 							fromAddr.sin_port);
 		} else {
 			fprintf(stderr,"got xid 0x%08lx but its slot is empty\n",
-							xid);
+						xid);
 		}
 		/* forget about this one and try again */
 		xact = 0;
