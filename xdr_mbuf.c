@@ -40,14 +40,16 @@ static char *rcsid = "$FreeBSD: src/lib/libc/xdr/xdr_mem.c,v 1.8 1999/08/28 00:0
 #endif
 
 /*
+ * xdr_mbuf,  XDR implementation using mbuf buffers
+ * 
+ * derived from:
+ *
  * xdr_mem.h, XDR implementation using memory buffers.
  *
  * Copyright (C) 1984, Sun Microsystems, Inc.
  *
- * If you have some data to be interpreted as external data representation
- * or to be converted to external data representation in a memory buffer,
- * then this is the package for you.
- *
+ * The MBUF stream is useful for BSDNET kernel (or RTEMS for that matter)
+ * use. 
  */
 
 #include <string.h>
@@ -125,9 +127,14 @@ static struct	xdr_ops xdrmbuf_ops_unaligned = {
 typedef struct MBPrivateRec_ {
 	struct mbuf		*mchain;
 	struct mbuf		*mcurrent;
-	u_int			pos;
+	u_int			pos;		/* number of bytes contained in all MUBFS ahead
+								 * of mcurrent
+								 */
 } MBPrivateRec, *MBPrivate;
 
+/* NOTE: the stream position helper 'pos'
+ *       must be managed by the caller!
+ */
 static inline void
 xdrmbuf_setup(XDR *xdrs, struct mbuf *m)
 {
@@ -146,7 +153,12 @@ xdrmbuf_next(XDR *xdrs)
 struct mbuf		*rval;
 MBPrivate		mbp = (MBPrivate)xdrs->x_base;
 
-	rval = mbp->mcurrent ? mbp->mcurrent->m_next : 0;
+	if (mbp->current) {
+		mbp->pos += mbp->mcurrent->m_len;
+		rval      = mbp->mcurrent->m_next;
+	} else {
+		rval      = 0;
+	}
 
 	if (rval) {
 		xdrmbuf_setup(xdrs, rval);
@@ -215,9 +227,12 @@ static bool_t
 xdrmbuf_getlong_aligned(register XDR *xdrs, register long *lp)
 {
 	while ((xdrs->x_handy -= sizeof(int32_t)) < 0) {
-		if ( !xdrmbuf_next(xdrs) ) {
-			return (FALSE);
-		}
+		/* uh-oh an aligned long spread over two MBUFS ??
+		 * let the unaligned handler deal with this rare
+		 * situation
+		 */
+		xdrs->x_handy += sizeof(int32_t);
+		return xdrmbuf_getlong_unaligned(xdrs,lp);
 	}
 	*lp = ntohl(*(int32_t *)(xdrs->x_private));
 	xdrs->x_private += sizeof(int32_t);
@@ -256,7 +271,38 @@ union {
 register int  i,j;
 register char *cp,*sp;
 
+	/* handle the most common case first */
+	if ( xdrs->x_handy >= sizeof(int32_t) ) {
+#ifdef CANDO_UNALIGNED
+		{
+			xdrs->x_handy   -= sizeof(int32_t);
+			*lp              = ntohl(*(int32_t *)(xdrs->x_private));
+			xdrs->x_private += sizeof(int32_t);
+#        if DEBUG & DEBUG_VERB
+			fprintf(stderr,"Got unaligned long %x (%i remaining)\n",*lp, xdrs->x_handy);
+#        endif
+			return TRUE;
+		}
+#else   /* machine can't do unaligned access */
+		{
+			sp			    = (char*)xdrs->x_private;
+	
+			u.c[0]          = *sp;
+			u.c[1]          = *++sp;
+			u.c[2]          = *++sp;
+			u.c[3]          = *++sp;
+			xdrs->x_private = (caddr_t) ++sp;
+			xdrs->x_handy  -= sizeof(int32_t);
+
+			goto done;
+		}
+#endif /* CANDO_UNALIGNED */
+	}
+
+	/* here the messy 'crossing buffers' business starts */
+
 	j  = sizeof(int32_t);
+
 	cp = u.c-1;
 
 	do {
@@ -286,6 +332,7 @@ register char *cp,*sp;
 done:
 
 	*lp = ntohl(u.l);
+
 #if DEBUG & DEBUG_VERB
 	fprintf(stderr,"Got unaligned long %x (%i remaining)\n",*lp, xdrs->x_handy);
 #endif
@@ -331,7 +378,11 @@ int	olen=len,bufs=0;
 			memcpy(addr, xdrs->x_private, len);
 			xdrs->x_private += len;
 			xdrs->x_handy   -= len;
+#if 0 /* save a couple of instructions */
 			len = 0;
+#else
+			goto done;
+#endif
 		} else {
 			if (xdrs->x_handy > 0) {
 				memcpy(addr, xdrs->x_private, xdrs->x_handy);
@@ -345,6 +396,7 @@ int	olen=len,bufs=0;
 #endif
 		}
 	}
+done:
 #if DEBUG & DEBUG_VERB
 	fprintf(stderr,"Got %i bytes (out of %i mbufs)\n",olen,bufs);
 #endif
@@ -373,7 +425,16 @@ static u_int
 xdrmbuf_getpos(xdrs)
 	register XDR *xdrs;
 {
-struct		mbuf *m;
+#if 1
+MBPrivate	mbp  = (MBPrivate)xdrs->x_base;
+struct mbuf *m   = mbp->mcurrent;
+u_int       rval = mbp->pos;
+
+	if (m) {
+		rval += (u_long)xdrs->x_private - mtod(m, u_long);
+	}
+#else
+struct mbuf *m;
 u_int 		rval = 0;
 MBPrivate	mbp  = (MBPrivate)xdrs->x_base;
 
@@ -382,6 +443,8 @@ MBPrivate	mbp  = (MBPrivate)xdrs->x_base;
 	if (m) {
 		rval += (u_long)xdrs->x_private - mtod(m, u_long);
 	}
+
+#endif
 	return rval;
 }
 
@@ -391,19 +454,30 @@ xdrmbuf_setpos(xdrs, pos)
 	u_int pos;
 {
 struct		mbuf *m;
-u_int 		rval = 0;
-MBPrivate	mbp  = (MBPrivate)xdrs->x_base;
+u_int 		rval  = 0;
+MBPrivate	mbp   = (MBPrivate)xdrs->x_base;
 
-	for (m = mbp->mchain; m && pos >= m->m_len; m = m->m_next)
-			pos -= m->m_len;
+	if (pos >= mbp->pos) {
+		pos      -= mbp->pos;
+		m         = mbp->mcurrent;
+	} else {
+		m         = mbp->mchain;
+		mbp->pos  = 0;
+	}
+
+	while ( m && pos >= m->m_len ) {
+		pos      -= m->m_len;
+		mbp->pos += m->m_len;
+		m         = m->m_next;
+	}
 
 	if (m) {
 		xdrmbuf_setup(xdrs, m);
 		xdrs->x_private += pos;
 		return TRUE;
 	}
-	
-	return FALSE;
+
+	return 0 == pos ? TRUE : FALSE;
 }
 
 static int32_t *
@@ -430,6 +504,5 @@ xdrmbuf_inline_unaligned(xdrs, len)
 	register XDR *xdrs;
 	int len;
 {
-	
 	return (0);
 }

@@ -29,28 +29,30 @@
 
 struct socket *rtems_bsdnet_fdToSocket(int fd);
 
-#if 0
 /*
  * Package system call argument into mbuf.
  */
-static int
-sockargstombuf (struct mbuf **mp, const void *buf, int buflen, int type)
+int
+sockaddrtombuf (struct mbuf **mp, const struct sockaddr *buf, int buflen)
 {
-	struct mbuf *m;
+struct mbuf *m;
+struct sockaddr *sa;
 
 	if ((u_int)buflen > MLEN)
 		return (EINVAL);
-	m = m_get(M_WAIT, type);
+
+	rtems_bsdnet_semaphore_obtain();
+	m = m_get(M_WAIT, MT_SONAME);
+	rtems_bsdnet_semaphore_release();
+
 	if (m == NULL)
 		return (ENOBUFS);
 	m->m_len = buflen;
 	memcpy (mtod(m, caddr_t), buf, buflen);
 	*mp = m;
-	if (type == MT_SONAME) {
-		struct sockaddr *sa;
-		sa = mtod(m, struct sockaddr *);
-		sa->sa_len = buflen;
-	}
+	sa = mtod(m, struct sockaddr *);
+	sa->sa_len = buflen;
+
 	return 0;
 }
 
@@ -58,62 +60,30 @@ sockargstombuf (struct mbuf **mp, const void *buf, int buflen, int type)
  * All `transmit' operations end up calling this routine.
  */
 ssize_t
-sendmsg (int s, const struct msghdr *mp, int flags)
+send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toaddr, int tolen)
 {
-	int ret = -1;
-	int error;
-	struct uio auio;
-	struct iovec *iov;
+	int           error;
 	struct socket *so;
-	struct mbuf *to, *control;
-	int i;
-	int len;
+	int           i;
+	struct mbuf   *to =  0;
+	int           ret = -1;
+
+	memset(&auio, 0, sizeof(auio));
 
 	rtems_bsdnet_semaphore_obtain ();
 	if ((so = rtems_bsdnet_fdToSocket (s)) == NULL) {
 		rtems_bsdnet_semaphore_release ();
 		return -1;
 	}
-	auio.uio_iov = mp->msg_iov;
-	auio.uio_iovcnt = mp->msg_iovlen;
-	auio.uio_segflg = UIO_USERSPACE;
-	auio.uio_rw = UIO_WRITE;
-	auio.uio_offset = 0;
-	auio.uio_resid = 0;
-	iov = mp->msg_iov;
-	for (i = 0; i < mp->msg_iovlen; i++, iov++) {
-		if ((auio.uio_resid += iov->iov_len) < 0) {
-			errno = EINVAL;
-			rtems_bsdnet_semaphore_release ();
-			return -1;
-		}
+
+	error = sockargstombuf (&to, toaddr, tolen);
+	if (error) {
+		errno = error;
+		rtems_bsdnet_semaphore_release ();
+		return -1;
 	}
-	if (mp->msg_name) {
-		error = sockargstombuf (&to, mp->msg_name, mp->msg_namelen, MT_SONAME);
-		if (error) {
-			errno = error;
-			rtems_bsdnet_semaphore_release ();
-			return -1;
-		}
-	}
-	else {
-		to = NULL;
-	}
-	if (mp->msg_control) {
-		if (mp->msg_controllen < sizeof (struct cmsghdr)) {
-			errno = EINVAL;
-			if (to)
-				m_freem(to);
-			rtems_bsdnet_semaphore_release ();
-			return -1;
-		}
-		sockargstombuf (&control, mp->msg_control, mp->msg_controllen, MT_CONTROL);
-	}
-	else {
-		control = NULL;
-	}
-	len = auio.uio_resid;
-	error = sosend (so, to, &auio, (struct mbuf *)0, control, flags);
+
+	error = sosend (so, to, NULL, mb, NULL, flags);
 	if (error) {
 		if (auio.uio_resid != len && (error == EINTR || error == EWOULDBLOCK))
 			error = 0;
@@ -129,6 +99,7 @@ sendmsg (int s, const struct msghdr *mp, int flags)
 }
 
 
+#if 0
 /*
  * Send a message to a host
  */
@@ -144,8 +115,6 @@ sendto (int s, const void *buf, size_t buflen, int flags, const struct sockaddr 
 	msg.msg_namelen = tolen;
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
-	msg.msg_control = NULL;
-	msg.msg_controllen = 0;
 	return sendmsg (s, &msg, flags);
 }
 #endif
