@@ -118,7 +118,7 @@ static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
 #define DEBUG_READDIR		(1<<3)
 #define DEBUG_SYSCALLS		(1<<4)
 
-#define DEBUG	( DEBUG_SYSCALLS | DEBUG_COUNT_NODES )
+/* #define DEBUG	( DEBUG_SYSCALLS | DEBUG_COUNT_NODES ) */
 
 #ifdef DEBUG
 #define STATIC
@@ -2190,6 +2190,12 @@ int	 							rval = RVAL_ERR_AND_DO_FREENODE;
 				if (updateAttr(node, 1 /* force */))
 					goto cleanup;
 
+				if (SERP_ATTR(node).type != NFDIR) {
+					errno = ENOTDIR;
+					goto cleanup;
+				}
+
+				pathloc->handlers = &nfs_dir_file_handlers;
 
 				err = nfs_evalpath(buf, flags, pathloc);
 
