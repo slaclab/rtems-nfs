@@ -1,15 +1,23 @@
 /*
  *  $Id$
+ *
+ *  NOTE:
+ *    This is derived from libnetworking/rtems/rtems_syscall.c
+ *
+ *    RTEMS/libnetworking LICENSING restrictions may apply
+ *
+ *    Author (modifications only)
+ *    		Till Straumann, <strauman@slac.stanford.edu>, 2002
  */
 
 #include <string.h>
 #include <stdarg.h>
-/* #include <stdlib.h> */
 #include <stdio.h>
 
 #include <rtems.h>
 #include <rtems/libio.h>
 #include <rtems/error.h>
+
 #define KERNEL
 #include <rtems/rtems_bsdnet.h>
 
@@ -27,14 +35,14 @@
 #include <net/if.h>
 #include <net/route.h>
 
-#include "rpcio.h"
-
 struct socket *rtems_bsdnet_fdToSocket(int fd);
 
 /*
  * Package system call argument into mbuf.
+ *
+ * (unfortunately, the original is not public)
  */
-int
+static int
 sockaddrtombuf (struct mbuf **mp, const struct sockaddr *buf, int buflen)
 {
 struct mbuf *m;
@@ -64,7 +72,16 @@ dummyproc(caddr_t ext_buf, u_int ext_size)
 }
 
 /*
- * All `transmit' operations end up calling this routine.
+ * send data by simply allocating an MBUF packet
+ * header and pointing it to our data region.
+ *
+ * Optionally, the caller may supply 'reference'
+ * and 'free' procs. (The latter may call the
+ * user back once the networking stack has
+ * released the buffer).
+ * 
+ * The callbacks are provided with the 'closure'
+ * pointer and the 'buflen' argument.
  */
 ssize_t
 sendto_nocpy (
@@ -100,30 +117,17 @@ sendto_nocpy (
 	m->m_pkthdr.len   = 0;
 	m->m_pkthdr.rcvif =  (struct ifnet *) 0;
 
-	/* if everything fits into one buffer - fine, just copy */
-#if 0
-	if (buflen <= MHLEN) {
-		MH_ALIGN(m, buflen);
-		memcpy( mtod(m,void*), buf, buflen);
-#if DEBUG & DEBUG_VERBOSE
-		fprintf(stderr,"Single MBUF fit\n");
-#endif
-	}
-	else
-#endif
-	{
-		m->m_flags       |= M_EXT;
-		m->m_ext.ext_buf  = closure ? closure : (void*)buf;
-		m->m_ext.ext_size = buflen;
-		/* we _must_ supply non-null procs; otherwise,
-		 * the code assumes it's a mbuf cluster
-		 */
-		m->m_ext.ext_free = freeproc ? freeproc : dummyproc;
-		m->m_ext.ext_ref  = refproc  ? refproc  : dummyproc;
-		m->m_pkthdr.len  += buflen;
-		m->m_len          = buflen;
-		m->m_data		  = (void*)buf;
-	}
+	m->m_flags       |= M_EXT;
+	m->m_ext.ext_buf  = closure ? closure : (void*)buf;
+	m->m_ext.ext_size = buflen;
+	/* we _must_ supply non-null procs; otherwise,
+	 * the kernel code assumes it's a mbuf cluster
+	 */
+	m->m_ext.ext_free = freeproc ? freeproc : dummyproc;
+	m->m_ext.ext_ref  = refproc  ? refproc  : dummyproc;
+	m->m_pkthdr.len  += buflen;
+	m->m_len          = buflen;
+	m->m_data		  = (void*)buf;
 
 	error = sosend (so, to, NULL, m, NULL, flags);
 	if (error) {
@@ -133,7 +137,7 @@ sendto_nocpy (
 	if (error) 
 		errno = error;
 	else
-		ret = buflen /*- auio.uio_resid*/;
+		ret = buflen;
 	if (to)
 		m_freem(to);
 	rtems_bsdnet_semaphore_release ();
@@ -141,28 +145,14 @@ sendto_nocpy (
 }
 
 
-#if 0
 /*
- * Send a message to a host
- */
-ssize_t
-sendto (int s, const void *buf, size_t buflen, int flags, const struct sockaddr *to, int tolen)
-{
-	struct msghdr msg;
-	struct iovec iov;
-
-	iov.iov_base = (void *)buf;
-	iov.iov_len = buflen;
-	msg.msg_name = (caddr_t)to;
-	msg.msg_namelen = tolen;
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	return sendmsg (s, &msg, flags);
-}
-#endif
-
-/*
- * All `receive' operations end up calling this routine.
+ * receive data in an 'mbuf chain'.
+ * The chain must be released once the
+ * data has been extracted:
+ *
+ *   rtems_bsdnet_semaphore_obtain();
+ *   	m_freem(chain);
+ *   rtems_bsdnet_semaphore_release();
  */
 ssize_t
 recv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, int *fromlen)
@@ -222,32 +212,3 @@ recv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, in
 	rtems_bsdnet_semaphore_release ();
 	return (ret);
 }
-
-#if 0
-/*
- * Receive a message from a host
- */
-ssize_t
-recvfrom (int s, void *buf, size_t buflen, int flags, const struct sockaddr *from, int *fromlen)
-{
-	struct msghdr msg;
-	struct iovec iov;
-	int ret;
-
-	iov.iov_base = buf;
-	iov.iov_len = buflen;
-	msg.msg_name = (caddr_t)from;
-	if (fromlen)
-		msg.msg_namelen = *fromlen;
-	else
-	msg.msg_namelen = 0;
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = NULL;
-	msg.msg_controllen = 0;
-	ret = recvmsg (s, &msg, 0);
-	if ((from != NULL) && (fromlen != NULL) && (ret >= 0))
-		*fromlen = msg.msg_namelen;
-	return ret;
-}
-#endif

@@ -33,7 +33,7 @@
 
 #define MBUF_RX			/* If defined: use mbuf XDR stream for
 						 *  decoding directly out of mbufs
-						 *  Otherwise, the regular sendto/recvfrom
+						 *  Otherwise, the regular 'recvfrom()'
 						 *  interface will be used involving an
 						 *  extra buffer allocation + copy step.
 						 */
@@ -46,6 +46,9 @@
 						 *  data when fragmenting packets - it
 						 *  merely uses an mbuf chain pointing
 						 *  into different areas of the data.
+						 *
+						 * If undefined, the regular 'sendto()'
+						 *  interface is used. 
 						 */
 
 /* daemon task parameters */
@@ -1038,9 +1041,9 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 			}
 		}
 
-		ASSERT( rtems_clock_get(
-						RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
-						&unow ) );
+		ASSERT( RTEMS_SUCCESSFUL == rtems_clock_get(
+										RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
+										&unow ) );
 
 		/* measure everything relative to then to protect against
 		 * rollover
@@ -1089,8 +1092,8 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 					if ( 0==trip )
 						trip = 1;
 
-					/* retry_new = 0.75*retry_old + 0.25 * 4 * roundrip */
-					rtry   = (3*rtry + (trip << 2)) >> 2;
+					/* retry_new = 0.75*retry_old + 0.25 * 8 * roundrip */
+					rtry   = (3*rtry + (trip << 3)) >> 2;
 
 					if ( rtry > max_period )
 						rtry = max_period;
