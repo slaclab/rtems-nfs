@@ -1254,9 +1254,9 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 #if (DEBUG) & DEBUG_TIMEOUT
 					fprintf(stderr,"RPCIO XACT timed out; waking up requestor\n");
 #endif
-
-					ASSERT( RTEMS_SUCCESSFUL ==
-							rtems_event_send(xact->requestor, RTEMS_RPC_EVENT) );
+					if ( rtems_event_send(xact->requestor, RTEMS_RPC_EVENT) ) {
+						rtems_panic("RPCIO PANIC line: "__LINE__", requestor id was 0x%08x", xact->requestor);
+					}	
 
 				} else {
 					int len;
