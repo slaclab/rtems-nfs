@@ -390,8 +390,9 @@ NFS:
 4) CAVEATS & BUGS
 - - - - - - - - -
 Unfortunately, some bugs crawl around in the filesystem generics.
-Some of them might already be fixed. I recommend to use
-the patch distributed with RTEMS-NFS.
+(Some of them might already be fixed in versions later than
+rtems-ss-20020301).
+I recommend to use the patch distributed with RTEMS-NFS.
 
  o RTEMS uses/used (Joel said it has been fixed already) a 'short'
    ino_t which is not enough for NFS.
@@ -409,6 +410,10 @@ the patch distributed with RTEMS-NFS.
          is strongly recommended. It is NOT included in the patch, however
          as this is a major change requiring ALL of your sources to
          be recompiled.
+
+   THE ino_t SIZE IS FIXED IN GCC-3.2/NEWLIB-1.10.0-2 DISTRIBUTED BY
+   OAR.
+
  o You may work around most filesystem bugs by observing the following
    rules:
 
@@ -420,14 +425,14 @@ the patch distributed with RTEMS-NFS.
     * All threads who have their own userenv (who have called
       rtems_libio_set_private_env()) SHOULD 'chdir("/")' before
       terminating. Otherwise, (i.e. if their cwd is on NFS), it will
-      be impossible to unmount NFS involved.
+      be impossible to unmount the NFS involved.
 
  o The patch slightly changes the semantics of 'getpwent()' and
-   'getgrent()' & friends (to what is IMHO correct anyways - it is
-   also needed to fix a problem): with the patch applied, the passwd
-   and group files are always accessed from the 'current' user environment,
-   i.e. a thread who has changed its 'root' or 'uid' might not be able to
-   access these files anymore.
+   'getgrent()' & friends (to what is IMHO correct anyways - the patch is
+   also needed to fix another problem, however): with the patch applied,
+   the passwd and group files are always accessed from the 'current' user
+   environment, i.e. a thread who has changed its 'root' or 'uid' might
+   not be able to access these files anymore.
       
  o NOTE: RTEMS 'mount()' / 'unmount()' are NOT THREAD SAFE.
 
