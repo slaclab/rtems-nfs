@@ -354,17 +354,20 @@ xdrmbuf_putlong_unaligned(xdrs, lp)
 	register XDR *xdrs;
 	long *lp;
 {
-	int32_t l;
 
 	fprintf(stderr,"TODO: xdrmbuf_putlong_unaligned() is unimplemented\n");
 	return FALSE;
 #if 0
+	{
+	int32_t l;
+
 	if ((xdrs->x_handy -= sizeof(int32_t)) < 0)
 		return (FALSE);
 	l = htonl(*lp);
 	memcpy(xdrs->x_private, &l, sizeof(int32_t));
 	xdrs->x_private += sizeof(int32_t);
 	return (TRUE);
+	}
 #endif
 }
 
@@ -374,7 +377,6 @@ xdrmbuf_getbytes(xdrs, addr, len)
 	caddr_t addr;
 	register u_int len;
 {
-int	done = xdrs->x_handy - len;
 #if DEBUG & DEBUG_VERB
 int	olen=len,bufs=0;
 #endif
@@ -464,7 +466,6 @@ xdrmbuf_setpos(xdrs, pos)
 	u_int pos;
 {
 struct		mbuf *m;
-u_int 		rval  = 0;
 MBPrivate	mbp   = (MBPrivate)xdrs->x_base;
 
 	if (pos >= mbp->pos) {

@@ -96,7 +96,6 @@ sendto_nocpy (
 {
 	int           error;
 	struct socket *so;
-	int           i;
 	struct mbuf   *to, *m;
 	int           ret = -1;
 
