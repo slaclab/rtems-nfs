@@ -9,6 +9,7 @@
 C_PIECES=rpcio nfs
 C_FILES=$(C_PIECES:%=%.c)
 C_O_FILES=$(C_PIECES:%=${ARCH}/%.o)
+nfs_OBJS=$(nfs_C_PIECES:%=%.c)
 
 # C++ source names, if any, go here -- minus the .cc
 CC_PIECES=
@@ -25,7 +26,7 @@ S_O_FILES=$(S_FILES:%.S=${ARCH}/%.o)
 SRCS=$(C_FILES) $(CC_FILES) $(H_FILES) $(S_FILES)
 OBJS=$(C_O_FILES) $(CC_O_FILES) $(S_O_FILES)
 
-PGMS=${ARCH}/nfs.obj ${ARCH}/rpcio.obj
+PGMS=${ARCH}/nfs.obj ${ARCH}/rpcio.obj ${ARCH}/dirutils.obj 
 
 include $(RTEMS_MAKEFILE_PATH)/Makefile.inc
 include $(RTEMS_CUSTOM)
@@ -37,7 +38,7 @@ include $(RTEMS_ROOT)/make/leaf.cfg
 
 DEFINES  +=
 
-CPPFLAGS += -I. -I./proto
+CPPFLAGS += -I. -I../proto
 CFLAGS   += -DHAVE_CEXP
 
 #
@@ -47,7 +48,7 @@ CFLAGS   += -DHAVE_CEXP
 # CFLAGS_DEBUG_V += -qrtems_debug
 #
 
-LDFLAGS   += -L./proto/${ARCH} -lnfsprot
+LDFLAGS   += -L../proto/${ARCH} -lnfsprot
 
 #
 # Add your list of files to delete here.  The config files
@@ -63,17 +64,10 @@ ifndef INSTALLDIR
 INSTALLDIR = $(PROJECT_RELEASE)
 endif
 
+%.obj:%.o
+	$(LD_FOR_TARGET) -r -o $@ $^
+
 all:	${ARCH} $(SRCS) $(PGMS)
-
-$(filter %.obj, $(PGMS)): ${OBJS}
-	$(LD_FOR_TARGET) -r -o $@ $(OBJS)
-	
-
-#	$(LD_FOR_TARGET) $(AM_CFLAGS) $(AM_LDFLAGS) -r -o $@ $(LINK_OBJS) $(LINK_LIBS)
-
-$(filter %.exe, $(PGMS)): ${OBJS} ${LINK_FILES}
-	$(make-exe)
-	xsyms $@ $(@:%.exe=%.sym)
 
 # Install the program(s), appending _g or _p as appropriate.
 # for include files, just use $(INSTALL_CHANGE)
