@@ -994,6 +994,10 @@ Nfs			nfs;
 static void
 _cexpModuleInitialize(void *mod)
 {	
+/* use this ugly construct to silence compiler warnings
+ * about this routine being unused
+ */ do {} while ( 0 && _cexpModuleInitialize);
+
 	nfsInit(0,0);
 }
 
@@ -1001,6 +1005,10 @@ _cexpModuleInitialize(void *mod)
 static int
 _cexpModuleFinalize(void *mod)
 {	
+/* use this ugly construct to silence compiler warnings
+ * about this routine being unused
+ */ do {} while ( 0 && _cexpModuleFinalize);
+
 	return nfsCleanup();
 }
 

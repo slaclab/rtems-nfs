@@ -5,11 +5,18 @@
 # 	Template leaf node Makefile
 #
 
+# if you have CEXP set this variable to 'YES'
+# and some "help" info will be compiled in.
+HAVE_CEXP=NO
+
 # C source names, if any, go here -- minus the .c
-C_PIECES=rpcio nfs
+C_PIECES_YES=rpcio nfs dirutils
+C_PIECES_NO=rpcio nfs
+
+C_PIECES=$(C_PIECES_$(HAVE_CEXP))
+
 C_FILES=$(C_PIECES:%=%.c)
 C_O_FILES=$(C_PIECES:%=${ARCH}/%.o)
-nfs_OBJS=$(nfs_C_PIECES:%=%.c)
 
 # C++ source names, if any, go here -- minus the .cc
 CC_PIECES=
@@ -27,19 +34,27 @@ SRCS=$(C_FILES) $(CC_FILES) $(H_FILES) $(S_FILES)
 OBJS=$(C_O_FILES) $(CC_O_FILES) $(S_O_FILES)
 
 PGMS=${ARCH}/nfs.obj ${ARCH}/rpcio.obj ${ARCH}/dirutils.obj 
+LIBOBJS=$(ARCH)/nfs.obj $(ARCH)/rpcio.obj
+
+LIBNAME=librtemsNfs.a
+
+LIB=$(ARCH)/$(LIBNAME)
 
 include $(RTEMS_MAKEFILE_PATH)/Makefile.inc
 include $(RTEMS_CUSTOM)
-include $(RTEMS_ROOT)/make/leaf.cfg
+include $(RTEMS_ROOT)/make/lib.cfg
 
 #
 # (OPTIONAL) Add local stuff here using +=
 #
 
-DEFINES  +=
+DEFS_CEXP_YES=-DHAVE_CEXP
+
+DEFINES  += $(DEFS_CEXP_$(HAVE_CEXP))
 
 CPPFLAGS += -I. -I../proto
-CFLAGS   += -DHAVE_CEXP
+
+CFLAGS   += 
 
 #
 # CFLAGS_DEBUG_V are used when the `make debug' target is built.
@@ -48,7 +63,7 @@ CFLAGS   += -DHAVE_CEXP
 # CFLAGS_DEBUG_V += -qrtems_debug
 #
 
-LDFLAGS   += -L../proto/${ARCH} -lnfsprot
+LDFLAGS   +=
 
 #
 # Add your list of files to delete here.  The config files
@@ -64,16 +79,22 @@ ifndef INSTALLDIR
 INSTALLDIR = $(PROJECT_RELEASE)
 endif
 
-%.obj:%.o
+%nfs.obj: %nfs.o
+	$(LD_FOR_TARGET) -r -o $@ $^ -L../proto/$(ARCH) -lnfsprot
+
+%rpcio.obj: %rpcio.o %sock_mbuf.o %xdr_mbuf.o
 	$(LD_FOR_TARGET) -r -o $@ $^
 
-all:	${ARCH} $(SRCS) $(PGMS)
+%dirutils.obj: %dirutils.o
+	$(LD_FOR_TARGET) -r -o $@ $^
+
+$(LIB): $(LIBOBJS)
+	$(make-library)
+
+all:	${ARCH} $(SRCS) $(PGMS) $(LIB)
 
 # Install the program(s), appending _g or _p as appropriate.
 # for include files, just use $(INSTALL_CHANGE)
 install:  all
 	$(INSTALL_VARIANT) -m 555 ${PGMS} ${INSTALLDIR}/bin
-	$(INSTALL_VARIANT) -m 555 ${PGMS} ${INSTALLDIR}/bin
-
-balla:
-	echo $(CPPFLAGS)
+	$(INSTALL_VARIANT) -m 555 ${LIB}  ${INSTALLDIR}/lib

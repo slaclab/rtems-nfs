@@ -1363,12 +1363,20 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 static void
 _cexpModuleInitialize(void *mod)
 {
+/* use this ugly construct to silence compiler warnings
+ * about '_cexpModuleInitialize' being unused...
+ */ do { } while (0 && _cexpModuleInitialize);
+
 	rpcUdpInit();
 }
 
 static int
 _cexpModuleFinalize(void *mod)
 {
+/* use this ugly construct to silence compiler warnings
+ * about '_cexpModuleFinalize' being unused...
+ */ do { } while (0 && _cexpModuleFinalize);
+
 	return rpcUdpCleanup();
 }
 

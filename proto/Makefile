@@ -10,7 +10,7 @@ LIBNAME=libnfsprot.a        # xxx- your library names goes here
 LIB=${ARCH}/${LIBNAME}
 
 # C and C++ source names, if any, go here -- minus the .c or .cc
-C_PIECES=nfs_prot_xdr mount_prot_xdr xdr_mbuf sock_mbuf
+C_PIECES=nfs_prot_xdr mount_prot_xdr
 C_FILES=$(C_PIECES:%=%.c)
 C_O_FILES=$(C_PIECES:%=${ARCH}/%.o)
 
