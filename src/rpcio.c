@@ -34,7 +34,12 @@
 #define XACT_HASH_MSK	((XACT_HASHS)-1)
 #define MBUF_RX			/* use mbuf XDR stream for decoding directly out of mbufs */
 
-#undef  DEBUG
+#define	DEBUG_TRACE_XACT	(1<<0)
+#define DEBUG_EVENTS		(1<<1)
+#define DEBUG_MALLOC		(1<<2)
+#define DEBUG_TIMEOUT		(1<<3)
+
+#define DEBUG	DEBUG_TIMEOUT
 
 #ifdef __rtems
 #define RTEMS_NFS_EVENT		RTEMS_EVENT_30
@@ -44,6 +49,7 @@
 #define RPCIOD_STACK		10000
 #define RPCIOD_PRIO			50
 #define RPCIOD_QDEPTH		20
+#define RPCIOD_RETX_CAP_S	3 /* seconds */
 #define HASH_TBL_LOCK()		do {rtems_semaphore_obtain(hlock, RTEMS_WAIT, RTEMS_NO_TIMEOUT);} while(0)
 #define HASH_TBL_UNLOCK()	do {rtems_semaphore_release(hlock);} while(0)
 
@@ -52,6 +58,7 @@
 			   				RTEMS_INHERIT_PRIORITY | \
 						   	RTEMS_BINARY_SEMAPHORE)
 
+#define FIRST_ATTEMPT		0x88888888 /* some time that is never reached */
 #else
 
 #define HASH_TBL_LOCK()		do {} while(0)
@@ -111,6 +118,7 @@ typedef struct RpcUdpXactRec_ {
 		struct rpc_err		status;
 #ifdef __rtems
 		long				age;
+		long				trip;
 		rtems_id			requestor;
 		RpcUdpXactPool		pool;
 #endif
@@ -149,7 +157,7 @@ static rtems_interval	ticksPerSec;
 static void rpcio_daemon(rtems_task_argument);
 #endif
 
-#ifdef DEBUG
+#if DEBUG & DEBUG_MALLOC
 static int nibufs = 0;
 
 static inline void *MALLOC(int s)
@@ -266,7 +274,7 @@ register int	i,j;
 			do {
 				i=(i+1) & XACT_HASH_MSK; /* cheap modulo */
 				if (!xactHashTbl[i]) {
-#if DEBUG & 1
+#if DEBUG & DEBUG_TRACE_XACT
 					fprintf(stderr,"RPCIO: entering index %i, val %x\n",i,rval);
 #endif
 					xactHashTbl[i]=rval;
@@ -295,7 +303,7 @@ rpcUdpXactDestroy(RpcUdpXact xact)
 {
 int i = xact->obuf.xid & XACT_HASH_MSK;
 
-#if DEBUG & 1
+#if DEBUG & DEBUG_TRACE_XACT
 		fprintf(stderr,"RPCIO: removing index %i, val %x\n",i,xact);
 #endif
 
@@ -338,6 +346,14 @@ va_list			ap;
 
 #ifdef __rtems
 	xact->retrans = ms * ticksPerSec / 1000 / srvr->retry_period;
+#if DEBUG & DEBUG_TIMEOUT
+{
+	static int once=0;
+	if (!once++) {
+		fprintf(stderr,"Initial retry count: %i\n",xact->retrans);
+	}
+}
+#endif
 #else
 	xact->retrans = ms / (1000 * srvr->retry_period.tv_sec +
 						  srvr->retry_period.tv_usec/1000);
@@ -404,7 +420,11 @@ rtems_event_set		gotEvents;
 			RTEMS_WAIT | RTEMS_EVENT_ANY,
 			RTEMS_NO_TIMEOUT,
 			&gotEvents);
+
 	if (xact->status.re_status) {
+#ifdef MBUF_RX
+		assert( !xact->ibuf );
+#endif
 		return xact->status.re_status;
 	}
 #endif
@@ -684,7 +704,7 @@ RxBuf			 buf = 0;
 		if (events & RPCIOD_KILL_EVENT) {
 			int i;
 
-#if DEBUG & 2
+#if DEBUG & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got KILL event\n");
 #endif
 
@@ -710,6 +730,15 @@ RxBuf			 buf = 0;
 			}
 		}
 
+		rtems_clock_get(
+				RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
+				&now);
+
+		/* measure everything relative to then to protect against
+		 * rollover
+		 */
+		now-=then;
+
 		/* NOTE: we don't lock the hash table while we are operating
 		 * on transactions; the paradigm is that we 'own' a particular
 		 * transaction (and hence it's hash table slot) from the
@@ -719,7 +748,7 @@ RxBuf			 buf = 0;
 
 		if (RPCIOD_RX_EVENT & events) {
 
-#if DEBUG & 2
+#if DEBUG & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got RX event\n");
 #endif
 
@@ -729,10 +758,28 @@ RxBuf			 buf = 0;
 			}
 #endif
 			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
+
 				/* extract from the retransmission list */
 				nodeXtract(&xact->node);
-				/* wakeup requestor */
+
 				xact->status.re_status = RPC_SUCCESS;
+
+				/* calculate roundtrip ticks */
+				xact->trip = now - xact->trip;
+
+				/* adjust the server's retry period */
+				{
+					register TimeoutT rtry = xact->server->retry_period;
+
+					/* retry_new = 0.75*retry_old + 0.25 * 4 * roundrip */
+					rtry = 3*rtry + (xact->trip << 2);
+					rtry >>= 2;
+					if (0==rtry)
+						rtry = 1;
+					xact->server->retry_period = rtry;
+				}
+
+				/* wakeup requestor */
 				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
 #ifndef MBUF_RX
 				if (!buf)
@@ -747,17 +794,9 @@ RxBuf			 buf = 0;
 #endif
 		}
 
-		rtems_clock_get(
-				RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
-				&now);
-		/* measure everything relative to then to protect against
-		 * rollover
-		 */
-		now-=then;
-
 		if (RPCIOD_TX_EVENT & events) {
 
-#if DEBUG & 2
+#if DEBUG & DEBUG_EVENTS
 			fprintf(stderr,"RPCIO: got TX event\n");
 #endif
 
@@ -771,22 +810,32 @@ RxBuf			 buf = 0;
 				nodeAppend(&listHead, &xact->node);
 
 				xact->retrans++; /* account for initial transmission */
-				xact->age = now;
+				xact->age  = now;
+				xact->trip = FIRST_ATTEMPT;
 			}
 		}
 
 
 		/* work the timeout q */
 		newList = 0;
-		for ( xact=(RpcUdpXact)listHead.next; xact && xact->age <= now; ) {
+		for ( xact=(RpcUdpXact)listHead.next;
+			  xact && xact->age <= now;
+			  xact=(RpcUdpXact)listHead.next ) {
 
 				/* extract from the list */
 				nodeXtract(&xact->node);
 
-				if (--xact->retrans <= 0) {
+				if (--xact->retrans < 0) {
 					/* this one timed out */
+					xact->status.re_errno  = ETIMEDOUT;
 					xact->status.re_status = RPC_TIMEDOUT;
-					rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+
+#if DEBUG & DEBUG_TIMEOUT
+					fprintf(stderr,"XACT timed out; waking up requestor\n");
+#endif
+
+					assert( RTEMS_SUCCESSFUL ==
+							rtems_event_send(xact->requestor, RTEMS_NFS_EVENT) );
 
 				} else {
 					int len;
@@ -799,18 +848,58 @@ RxBuf			 buf = 0;
 						0,
 						(struct sockaddr*) &xact->server->addr,
 						sizeof(xact->server->addr)) != len ) {
-						xact->status.re_errno = errno;
-						xact->status.re_status=RPC_CANTSEND;
+						xact->status.re_errno  = errno;
+						xact->status.re_status = RPC_CANTSEND;
 						/* wakeup requestor */
 						fprintf(stderr,"RPCIO: SEND failure\n");
-						rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+						assert( RTEMS_SUCCESSFUL ==
+									rtems_event_send(xact->requestor, RTEMS_NFS_EVENT) );
 					} else {
 						/* send successful; calculate retransmission time
 						 * and enqueue to temporary list
 						 */
-						xact->age = now + xact->server->retry_period;
+						if (FIRST_ATTEMPT != xact->trip) {
+
+							RpcUdpServer	srv = xact->server;
+
+#if DEBUG & DEBUG_TIMEOUT
+							fprintf(stderr,
+									"timed out; retrans is %i, retry period is %i\n",
+									xact->retrans,
+									srv->retry_period);
+#endif
+							/* this is a real retry; we backup
+							 * the server's retry interval
+							 */
+							if ( srv->retry_period <
+								 RPCIOD_RETX_CAP_S * ticksPerSec ) {
+								/* only adjust if we didn't recently (otherwise,
+								 * several outstanding transactions could hit...
+								 */
+								if ( srv->lastadj <= 0 ||
+									 now > srv->lastadj + srv->retry_period ) {
+									srv->lastadj = now;
+									srv->retry_period<<=1;
+#if DEBUG & DEBUG_TIMEOUT
+									fprintf(stderr,
+											"adjusted to; retry period %i\n",
+											srv->retry_period);
+#endif
+								}
+							} else {
+								char chbuf[20], *snam;
+								if ( !inet_ntop(AF_INET, &srv->addr, chbuf, sizeof[chbuf] )
+									strcpy(chbuf,"?.?.?.?");
+								/* never wait longer than 3 seconds */
+								fprintf(stderr,
+										"RPCIO: server '%s' not responding - still trying\n",
+										chbuf);
+							}
+						}
+						xact->trip      = now;
+						xact->age       = now + xact->server->retry_period;
 						xact->node.next = newList;
-						newList = &xact->node;
+						newList         = &xact->node;
 					}
 				}
 	    }
@@ -831,12 +920,23 @@ RxBuf			 buf = 0;
 			register ListNode n;
 			then += now;
 			for (n=listHead.next; n; n=n->next) {
-				((RpcUdpXact)n)->age-=now;
+				/* age = oldnow + age - newnow */
+				((RpcUdpXact)n)->age  -= now;
+				/* roundtrip = arrive - sent = arrive + newthen - (sent + oldthen)
+				 *                           = arrive + newthen - (sent + newthen - oldthen)
+				 *  ==> sent = (sent - oldthen) + newthen = sent + now;
+				 */
+				((RpcUdpXact)n)->trip += now;
+				/* lastadj = oldadj + oldthen = newadj + newthen
+				 * ==> newadj = oldadj + oldthen - newthen = oldadj - now
+				 */
+				if ( ((RpcUdpXact)n)->server->lastadj >0 )
+				     ((RpcUdpXact)n)->server->lastadj -= now;
 			}
 		}
 
 		next_retrans = listHead.next ? ((RpcUdpXact)listHead.next)->age - now : RTEMS_NO_TIMEOUT;
-#if DEBUG & 4
+#if DEBUG & DEBUG_TIMEOUT
 		fprintf(stderr,"RPCIO: next timeout is %x\n",next_retrans);
 #endif
 	}
@@ -988,7 +1088,7 @@ RpcUdpXactPool pool;
 #include <sys/mbuf.h>
 
 ssize_t
-rcv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, int *fromlen);
+recv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, int *fromlen);
 
 static void
 bufFree(struct mbuf *m)
@@ -1016,7 +1116,7 @@ struct sockaddr_in	fromAddr;
 int					fromLen  = sizeof(fromAddr);
 
 #ifdef MBUF_RX
-	len = rcv_mbuf_from(ourSock,
+	len = recv_mbuf_from(ourSock,
 					pibuf,
 					UDPMSGSIZE,
 				   (struct sockaddr*)&fromAddr, &fromLen);
