@@ -110,8 +110,6 @@ rpcUdpCallRp(
 );
 
 
-#ifdef __rtems /* pools are implemented by RTEMS message queues */
-
 /* manage pools of transactions */
 
 /* A pool of transactions. The idea is not to malloc/free them
@@ -151,6 +149,5 @@ rpcUdpXactPoolGet(RpcUdpXactPool pool, XactPoolGetMode mode);
 
 void
 rpcUdpXactPoolPut(RpcUdpXact xact);
-#endif
 
 #endif

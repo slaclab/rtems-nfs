@@ -16,9 +16,7 @@
  * is handled by the daemon).
  */
 
-#ifdef __rtems
 #include <rtems.h>
-#endif
 #include <stdlib.h>
 #include <rpc/rpc.h>
 #include <rpc/pmap_prot.h>
@@ -71,7 +69,6 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
  */
 #define RPCIOD_REFRESH		2
 
-#ifdef __rtems
 /* Events we are using; the RPC_EVENT
  * MUST NOT be used by any application
  * thread doing RPC IO (e.g. NFS)
@@ -83,8 +80,6 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define RPCIOD_RX_EVENT		RTEMS_EVENT_1	/* Events the RPCIOD is using/waiting for */
 #define RPCIOD_TX_EVENT		RTEMS_EVENT_2
 #define RPCIOD_KILL_EVENT	RTEMS_EVENT_3	/* send to the daemon to kill it          */
-
-#endif
 
 #define LD_XACT_HASH		8				/* ld of the size of the transaction hash table  */
 
@@ -107,11 +102,6 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 /* END OF CONFIGURABLE SECTION                                  */
 /****************************************************************/
 
-#if defined(MBUF_RX) && !defined(__rtems)
-#warning MBUF_RX is only supported on RTEMS; disabling
-#undef	 MBUF_RX
-#endif
-
 /* prevent rollover of our timers by readjusting the epoch on the fly */
 #if	(DEBUG) & DEBUG_TIMEOUT
 #define RPCIOD_EPOCH_SECS	10
@@ -124,8 +114,6 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #else
 #define ASSERT(arg)			if (arg)
 #endif
-
-#ifdef __rtems
 
 /****************************************************************/
 /* MACROS                                                       */
@@ -177,23 +165,11 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 
 #define FIRST_ATTEMPT		0x88888888 /* some time that is never reached */
 
-#else
-
-#define HASH_TBL_LOCK()		do {} while(0)
-#define HASH_TBL_UNLOCK()	do {} while(0)
-
-#endif
-
 /****************************************************************/
 /* TYPE DEFINITIONS                                             */
 /****************************************************************/
 
-#ifdef __rtems
 typedef	rtems_interval		TimeoutT;
-#else
-typedef struct timeval		TimeoutT;
-#endif
-
 
 /* 100000th implementation of a doubly linked list;
  * since only one thread is looking at these,
@@ -262,12 +238,10 @@ typedef struct RpcUdpXactRec_ {
 		long				lifetime;	/* during the lifetime, retry attempts are made */
 		long				tolive;		/* lifetime timer                               */
 		struct rpc_err		status;		/* RPC reply error status                       */
-#ifdef __rtems
 		long				age;		/* age info; needed to manage retransmission    */
 		long				trip;		/* record round trip time in ticks              */
 		rtems_id			requestor;	/* the task waiting for this XACT to complete   */
 		RpcUdpXactPool		pool;		/* if this XACT belong to a pool, this is it    */
-#endif
 		XDR					xdrs;		/* argument encoder stream                      */
 		int					xdrpos;     /* stream position after the (permanent) header */
 		xdrproc_t			xres;		/* reply decoder proc - TODO needn't be here    */
@@ -283,14 +257,12 @@ typedef struct RpcUdpXactRec_ {
 		RpcBufU				obuf;       /* output buffer (encoded args) APPENDED HERE   */
 } RpcUdpXactRec;
 
-#ifdef __rtems
 typedef struct RpcUdpXactPoolRec_ {
 	rtems_id	box;
 	int			prog;
 	int			version;
 	int			xactSize;
 } RpcUdpXactPoolRec;
-#endif
 
 /* a global hash table where all 'living' transaction
  * objects are registered.
@@ -328,7 +300,6 @@ static void paranoia_ref (caddr_t closure, u_int size);
 #endif
 
 static int				ourSock = -1;	/* the socket we are using for communication */
-#ifdef __rtems
 static rtems_id			rpciod  = 0;	/* task id of the RPC daemon                 */
 static rtems_id			msgQ    = 0;	/* message queue where the daemon picks up
 										 * requests
@@ -338,10 +309,8 @@ static rtems_id			fini	= 0;	/* a synchronization semaphore we use during
 										 * module cleanup / driver unloading
 										 */
 static rtems_interval	ticksPerSec;	/* cached system clock rate (WHO IS ASSUMED NOT
-										 * TO CHANGE
+										 * TO CHANGE)
 										 */
-#endif
-
 #if (DEBUG) & DEBUG_MALLOC
 /* malloc wrappers for debugging */
 static int nibufs = 0;
@@ -579,9 +548,7 @@ register int	i,j;
 		rval->obuf.xid = time(0) ^ (unsigned long)rval;
 		MU_LOCK(hlock);
 		i=j=(rval->obuf.xid & XACT_HASH_MSK);
-#ifdef __rtems
 		if (msgQ) {
-#endif
 			/* if there's no message queue, refuse to 
 			 * give them transactions; we might be in the process to
 			 * go away...
@@ -597,9 +564,7 @@ register int	i,j;
 					break;
 				}
 			} while (i!=j);
-#ifdef __rtems
 		}
-#endif
 		MU_UNLOCK(hlock);
 		if (i==j) {
 			XDR_DESTROY(&rval->xdrs);
@@ -662,21 +627,16 @@ va_list			ap;
 
 	ms = 1000 * timeout->tv_sec + timeout->tv_usec/1000;
 
-#ifdef __rtems
 	xact->lifetime  = ms * ticksPerSec / 1000;
 #if (DEBUG) & DEBUG_TIMEOUT
-{
+	{
 	static int once=0;
 	if (!once++) {
 		fprintf(stderr,
 				"Initial lifetime: %i (ticks)\n",
 				xact->lifetime);
 	}
-}
-#endif
-#else
-	xact->lifetime  = ms / (1000 * srvr->retry_period.tv_sec +
-						  srvr->retry_period.tv_usec/1000);
+	}
 #endif
 
 	xact->tolive    = xact->lifetime;
@@ -700,15 +660,15 @@ va_list			ap;
 		va_end(ap);
 		return(xact->status.re_status=RPC_CANTENCODEARGS);
 	}
+
 	va_end(ap);
-#ifdef __rtems
+
 	rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
 	if ( rtems_message_queue_send( msgQ, &xact, sizeof(xact)) ) {
 		return RPC_CANTSEND;
 	}
 	/* wakeup the rpciod */
 	ASSERT( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
-#endif
 
 	return RPC_SUCCESS;
 }
@@ -725,15 +685,12 @@ int					i;
 int					refresh;
 XDR					reply_xdrs;
 struct rpc_msg		reply_msg;
-#ifdef __rtems
 rtems_event_set		gotEvents;
-#endif
 
 	refresh = 0;
 
 	do {
 
-#ifdef __rtems
 	/* block for the reply */
 	ASSERT( RTEMS_SUCCESSFUL ==
 			rtems_event_receive(
@@ -749,7 +706,6 @@ rtems_event_set		gotEvents;
 #endif
 		return xact->status.re_status;
 	}
-#endif
 
 #ifdef MBUF_RX
 	xdrmbuf_create(&reply_xdrs, xact->ibuf, XDR_DECODE);
@@ -795,7 +751,6 @@ rtems_event_set		gotEvents;
 	xact->ibufsize = 0;
 #endif
 	
-#ifdef __rtems
 	if (refresh && locked_refresh(xact->server)) {
 		rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
 		if ( rtems_message_queue_send(msgQ, &xact, sizeof(xact)) ) {
@@ -805,7 +760,6 @@ rtems_event_set		gotEvents;
 		fprintf(stderr,"INFO: refreshing my AUTH\n");
 		ASSERT( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
 	}
-#endif
 
 	} while ( 0 &&  refresh-- > 0 );
 
@@ -830,7 +784,6 @@ int len = (int)XDR_GETPOS(&xact->xdrs);
 	return RPC_SUCCESS;
 }
 
-#ifdef __rtems
 /* On RTEMS, I'm told to avoid select(); this seems to
  * be more efficient
  */
@@ -839,22 +792,18 @@ rxWakeupCB(struct socket *sock, caddr_t arg)
 {
 rtems_event_send((rtems_id)arg, RPCIOD_RX_EVENT);
 }
-#endif
 
 int
 rpcUdpInit(void)
 {
 int					noblock = 1;
-#ifdef __rtems
 struct sockwakeup	wkup;
-#endif
 
 	if (ourSock < 0) {
 		ourSock=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 		if (ourSock>=0) {
 			bindresvport(ourSock,(struct sockaddr_in*)0);
 			assert( 0==ioctl(ourSock, FIONBIO, (char*)&noblock) );
-#ifdef __rtems
 			/* assume nobody tampers with the clock !! */
 			assert( RTEMS_SUCCESSFUL == rtems_clock_get(
 											RTEMS_CLOCK_GET_TICKS_PER_SECOND,
@@ -882,7 +831,6 @@ struct sockwakeup	wkup;
 											rpcio_daemon,
 											0 ) );
 
-#endif
 		} else {
 			return -1;
 		}
@@ -950,11 +898,7 @@ rpcUdpClntCall(
 	)
 {
 enum clnt_stat	stat;
-#ifndef __rtems
-fd_set			rset;
-struct timeval	tmp;
-int				sel_err;
-#endif
+
 		if (stat = rpcUdpSend(xact, xact->server, timeout, proc,
 					xres, pres,
 					xargs, pargs,
@@ -962,29 +906,7 @@ int				sel_err;
 			fprintf(stderr,"Send failed: %i\n",stat);
 			return stat;
 		}
-#ifndef __rtems
-		do {
-			if (stat = sockSnd(xact)) {
-				fprintf(stderr,"Send failed: %i\n",stat);
-				return stat;
-			}
-			FD_ZERO(&rset);
-			FD_SET(ourSock, &rset);
-			/* linux tampers with this */
-			tmp = xact->server->retry_period;
-			sel_err=select(ourSock+1, &rset, 0, 0, &tmp);
-			if (sel_err > 0) {
-				/* OK */
-				if ( sockRcv() )
-					return rpcUdpRcv(xact);
-				fprintf(stderr,"Rcv failed '%s'\n",strerror(errno));
-			}
-		} while (xact->tolive--);
-
-		return RPC_TIMEDOUT;
-#else
 		return rpcUdpRcv(xact);
-#endif
 }
 
 /* a yet simpler interface */
@@ -1029,10 +951,6 @@ enum clnt_stat		stat;
 
 	return stat;
 }
-
-
-
-#ifdef __rtems
 
 /* linked list primitives */
 static void
@@ -1671,5 +1589,4 @@ cleanup:
  */
 #if RTEMS_RPC_EVENT & SOSLEEP_EVENT & SBWAIT_EVENT & NETISR_EVENTS
 #error ILLEGAL EVENT CONFIGURATION
-#endif
 #endif
