@@ -161,7 +161,6 @@ static struct timeval _nfscalltimeout = { 10, 0 };	/* {secs, us } */
 #define DEBUG_SYSCALLS		(1<<4)
 
 /* #define DEBUG	( DEBUG_SYSCALLS | DEBUG_COUNT_NODES ) */
-#define DEBUG (DEBUG_EVALPATH)
 
 #ifdef DEBUG
 #define STATIC
