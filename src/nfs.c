@@ -3077,7 +3077,7 @@ Nfs		nfs;
 			fprintf(f,"%s\n",mntpt);
 	}
 
-	UNLOCK(nfsGlob.lock);
+	UNLOCK(nfsGlob.llock);
 
 	free(mntpt);
 	return 0;
