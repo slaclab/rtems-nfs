@@ -1,4 +1,5 @@
-CFLAGS = -O
+INCS = -I/afs/slac/package/rtems/prod/rtems/powerpc-rtems/svgm/lib/include
+CFLAGS = -O $(INCS)
 RANLIB = ranlib
 
 XFILES = $(wildcard *.x)

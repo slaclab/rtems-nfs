@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <assert.h>
+#include <stdio.h>
 
 #include "rpcio.h"
 
@@ -14,8 +15,14 @@
 #define XACT_HASHS		(1<<(LD_XACT_HASH))
 #define XACT_HASH_MSK	((XACT_HASHS)-1)
 
+#ifdef __rtems
+#define RTEMS_NFS_EVENT		RTEMS_EVENT_30
+#endif
+
+
 #define HASH_TBL_LOCK()		do {} while(0)
 #define HASH_TBL_UNLOCK()	do {} while(0)
+
 
 typedef struct RpcServerRec_ {
 		struct sockaddr_in	addr;
@@ -29,6 +36,7 @@ typedef struct RpcUdpXactRec_ {
 		struct rpc_err		status;
 #ifdef __rtems
 		rtems_id			requestor;
+		rtems_id			retrans_timer;
 #endif
 		XDR					xdrs;
 		int					xdrpos;
@@ -99,7 +107,7 @@ register int	i,j;
 			return 0;
 		}
 		/* pick a free table slot and initialize the XID */
-		rval->obuf.xid = time() ^ (unsigned long)rval;
+		rval->obuf.xid = time(0) ^ (unsigned long)rval;
 		HASH_TBL_LOCK();
 		i=j=(rval->obuf.xid & XACT_HASH_MSK);
 		do {
@@ -120,6 +128,9 @@ register int	i,j;
 		rval->obuf.xid= (rval->obuf.xid << LD_XACT_HASH) | i;
 		rval->xdrpos  = XDR_GETPOS(&(rval->xdrs));
 		rval->bufsize = size;
+#ifdef __rtems
+		rval->retrans_timer = 0;
+#endif
 	}
 	return rval;
 }
@@ -156,6 +167,9 @@ rpcUdpSend(
 register XDR	*xdrs;
 int				len;
 va_list			ap;
+#ifdef __rtems
+rtems_event_set	gotEvents;
+#endif
 
 	va_start(ap,pargs);
 
@@ -181,6 +195,22 @@ va_list			ap;
 	}
 	va_end(ap);
 	len = (int)XDR_GETPOS(xdrs);
+#ifdef __rtems
+	rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
+	if (rtems_message_queue_send(
+								rpcQ,
+								&xact,
+								sizeof(xact))) {
+		return RPC_CANTSEND;
+	}
+	/* block for the reply */
+	rtems_event_receive(
+			RTEMS_NFS_EVENT,
+			RTEMS_WAIT | RTEMS_EVENT_ANY,
+			RTEMS_NO_TIMEOUT,
+			&gotEvents);
+	return xact->status.re_status;
+#else
 
 	if ( sendto(ourSock,
 				xact->obuf.buf,
@@ -191,7 +221,9 @@ va_list			ap;
 		xact->status.re_errno = errno;
 		return(xact->status.re_status=RPC_CANTSEND);
 	}
+
 	return RPC_SUCCESS;
+#endif
 }
 
 enum clnt_stat
@@ -214,7 +246,7 @@ int					fromLen = sizeof(fromAddr);
 	len = recvfrom(ourSock,
 				   ibuf.buf, sizeof(ibuf.buf),
 				   0,
-				   &fromAddr, &fromLen);
+				   (struct sockaddr*)&fromAddr, &fromLen);
 	if (len <= 0) {
 		fprintf(stderr,"RECV failed: %s\n",strerror(errno));
 		return RPC_CANTRECV;
@@ -268,7 +300,10 @@ int					fromLen = sizeof(fromAddr);
 int
 rpcUdpInit(void)
 {
-int noblock = 1;
+int				noblock = 1;
+#ifdef __rtems
+struct timeval	rxpoll;
+#endif
 
 	if (ourSock < 0) {
 		ourSock=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -276,6 +311,11 @@ int noblock = 1;
 			bindresvport(ourSock,(struct sockaddr_in*)0);
 #ifdef __linux
 			ioctl(ourSock, FIONBIO, (char*)&noblock);
+#endif
+#ifdef __rtems
+			rxpoll.tv_sec  = 3;
+			rxpoll.tv_usec = 0;
+			setsockopt(ourSock, SOL_SOCKET, SO_RCVTIMEO, &rxpoll);
 #endif
 		} else {
 			return -1;
@@ -347,3 +387,99 @@ int				sel_err;
 	}
 	return stat;
 }
+
+#ifdef __rtems
+
+int rpcIoDoRun = 1; /* so they may stop it */
+
+static void
+rpcrx_daemon(void arg)
+{
+enum clnt_stat	rxerr;
+RpcUdpXact		xact;
+
+	for (;rpcIoDoRun;) {
+
+		rxerr = rpcUdpRecv(&xact);
+
+		switch (rxerr) {
+			case RPC_SUCCESS:
+				/* cancel the retransmission timer */
+				if (xact->retrans_timer) {
+					/* here's a race condition; the timer could
+					 * have gone off
+					rtems_timer_delete(xact->retrans_timer);
+					xact->retrans_timer = 0;
+				}
+				/* wake up the requestor of the transaction */
+				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+				break;
+
+			case RPC_CANTRCV:
+				if (EWOULDBLOCK == errno) {
+					/* receive timeout */
+
+					continue;
+				}
+
+			default: /* unknown error */
+				sleep(2);
+				break;
+		}
+	}
+
+	rtems_task_delete(RTEMS_SELF);
+}
+
+static void
+rpctx_daemon(void arg)
+{
+RpcUdpXact	xact;
+u_long		size;
+	for (;;) {
+		rtems_message_queue_receive(
+				rpcQ,
+				&xact,
+				&size,
+				RTEMS_WAIT,
+				RTEMS_NO_TIMEOUT);
+		if (!xact) {
+			/* empty transaction: cleanup */
+			break;
+		}
+		if (!xact->retrans_timer) {
+			assert(RTEMS_SUCCESSFUL == rtems_timer_create(
+											rtems_build_name('R','P','C','t'),
+											&xact->retrans_timer
+											));
+		}
+		if ( sendto(ourSock,
+				xact->obuf.buf,
+				len,
+				0,
+				(struct sockaddr*) &srvr->addr,
+				sizeof(srvr->addr)) != len ) {
+			xact->status.re_errno = errno;
+			xact->status.re_status=RPC_CANTSEND;
+			/* wakeup requestor */
+			rtems_event_send(xact->requestor, RPC_NFS_EVENT);
+		} else {
+			/* send successful; set timer */
+			if ( ! xact->retrans_timer ) {
+				xact->status.re_status = RPC_CANTSEND;
+			}
+		}
+
+	}
+}
+#endif
+
+#ifdef __rtems
+#include <rtems/rtems_bsdnet_internal.h>
+/* double check the event configuration; should probably globally
+ * manage system events!!
+ */
+#if RTEMS_NFS_EVENT & SOSLEEP_EVENT & SBWAIT_EVENT & NETISR_EVENTS
+#error ILLEGAL EVENT CONFIGURATION
+#endif
+#endif

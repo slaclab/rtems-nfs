@@ -2,6 +2,7 @@
 #include <rpc/pmap_prot.h>
 #include <nfs_prot.h>
 #include <mount_prot.h>
+#include <stdio.h>
 #include "rpcio.h"
 
 #define NFS_VERSION_2 NFS_VERSION
