@@ -175,17 +175,21 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 
 
 #define MU_LOCK(mutex)		do { 							\
+							assert(							\
+								RTEMS_SUCCESSFUL ==			\
 								rtems_semaphore_obtain(		\
 										(mutex),			\
 										RTEMS_WAIT,			\
 										RTEMS_NO_TIMEOUT	\
-										);					\
+										) );				\
 							} while(0)
 
 #define MU_UNLOCK(mutex)	do {							\
+							assert(							\
+								RTEMS_SUCCESSFUL ==			\
 								rtems_semaphore_release(	\
 										(mutex)				\
-										);					\
+										) );				\
 							} while(0)
 
 #define MU_CREAT(pmutex)	do {							\
@@ -203,9 +207,11 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 
 
 #define MU_DESTROY(mutex)	do {							\
+							assert(							\
+								RTEMS_SUCCESSFUL ==			\
 								rtems_semaphore_delete(		\
 										mutex				\
-										);					\
+										) );				\
 							} while (0)
 
 #define MUTEX_ATTRIBUTES	(RTEMS_LOCAL           | 		\
@@ -592,8 +598,8 @@ RpcUdpServer prev;
 	/* MUST have found it */
 	assert(prev);
 
-	MU_LOCK(s->authlock);
 	auth_destroy(s->auth);
+
 	MU_DESTROY(s->authlock);
 	MY_FREE(s);
 }
