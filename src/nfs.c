@@ -909,6 +909,11 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
 entry	dummy;
 
+	fprintf(stderr,"This is RTEMS-NFS Release $Name$\n");
+	fprintf(stderr,"($Id$)\n\n");
+	fprintf(stderr,"Till Straumann, Stanford 2002\n");
+	fprintf(stderr,"See LICENSE file for licensing info\n");
+
 	/* Get a major number */
 
 	if (RTEMS_SUCCESSFUL != rtems_io_register_driver(0, &drvNfs, &nfsGlob.nfs_major)) {
