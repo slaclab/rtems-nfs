@@ -66,11 +66,6 @@
 #include <arpa/inet.h>
 
 
-#include <nfs_prot.h>
-#include <mount_prot.h>
-
-#include "rpcio.h"
-
 #ifdef HAVE_CEXP_H
 #include <cexpHelp.h>
 #endif
@@ -78,6 +73,7 @@
 /* RPCIO driver interface.
  * If you need RPCIO for other purposes than NFS
  * you may want to include <rpcio.h>
+#include "rpcio.h"
  */
 
 /* Initialize the driver
@@ -113,7 +109,7 @@ rpcUdpCleanup(void);
  * 			Supply zero values to have the
  * 			driver chose reasonable defaults.
  */
-void
+int
 nfsInit(int smallPoolDepth, int bigPoolDepth);
 
 /* Driver cleanup code
