@@ -97,7 +97,7 @@ rpcUdpXactPoolCreate(
 	int xactsize,	int poolsize);
 
 void
-rpcUdpXactPoolDelete(RpcUdpXactPool pool);
+rpcUdpXactPoolDestroy(RpcUdpXactPool pool);
 
 typedef enum {
 	XactGetFail,	/* call fails if no transaction available */

@@ -238,11 +238,12 @@ va_list			ap;
 	ms = 1000 * timeout.tv_sec + timeout.tv_usec/1000;
 
 #ifdef __rtems
-	xact->retrans = ms * ticksPerSec / 1000 / xact->server->retry_period;
+	xact->retrans = ms * ticksPerSec / 1000 / srvr->retry_period;
 #else
-	xact->retrans = ms / (1000 * xact->server->retry_period.tv_sec +
-						  xact->server->retry_period.tv_usec/1000);
+	xact->retrans = ms / (1000 * srvr->retry_period.tv_sec +
+						  srvr->retry_period.tv_usec/1000);
 #endif
+
 	xact->xres    = xres;
 	xact->pres    = pres;
 	xact->server  = srvr;
@@ -668,6 +669,7 @@ fprintf(stderr,"TSILL got TX\n");
 						xact->status.re_errno = errno;
 						xact->status.re_status=RPC_CANTSEND;
 						/* wakeup requestor */
+fprintf(stderr,"SEND failure\n");
 						rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
 					} else {
 						/* send successful; calculate retransmission time
@@ -701,6 +703,7 @@ fprintf(stderr,"TSILL got TX\n");
 		}
 
 		next_retrans = listHead.next ? ((RpcUdpXact)listHead.next)->age - now : RTEMS_NO_TIMEOUT;
+fprintf(stderr,"next timeout is %x\n",next_retrans);
 	}
 	/* close our socket; shut down the receiver */
 	close(ourSock);
@@ -780,7 +783,7 @@ RpcUdpXactPool	rval = malloc(sizeof(*rval));
 }
 
 void
-rpcUdpXactPoolDelete(RpcUdpXactPool pool)
+rpcUdpXactPoolDestroy(RpcUdpXactPool pool)
 {
 RpcUdpXact xact;
 
@@ -794,7 +797,7 @@ RpcUdpXact xact;
 RpcUdpXact
 rpcUdpXactPoolGet(RpcUdpXactPool pool, XactPoolGetMode mode)
 {
-RpcUdpXact		 xact;
+RpcUdpXact		 xact = 0;
 rtems_unsigned32 size;
 
 	if (RTEMS_SUCCESSFUL != rtems_message_queue_receive(
@@ -804,14 +807,16 @@ rtems_unsigned32 size;
 								XactGetWait == mode ?
 									RTEMS_WAIT : RTEMS_NO_WAIT,
 								RTEMS_NO_TIMEOUT)) {
-		if (XactGetCreate == mode) {
-			xact = rpcUdpXactCreate(
+		/* nothing found in box; should we create a new one ? */
+
+		xact = (XactGetCreate == mode) ?
+					rpcUdpXactCreate(
 							pool->prog,
 							pool->version,
-							pool->xactSize);
-			if (xact)
+							pool->xactSize) : 0 ;
+		if (xact)
 				xact->pool = pool;
-		}
+
 	}
 	return xact;
 }
@@ -822,7 +827,7 @@ rpcUdpXactPoolPut(RpcUdpXact xact)
 RpcUdpXactPool pool;
 	assert( pool=xact->pool );
 	if (RTEMS_SUCCESSFUL != rtems_message_queue_send(
-								pool,
+								pool->box,
 								&xact,
 								sizeof(xact)))
 		rpcUdpXactDestroy(xact);

@@ -72,8 +72,8 @@ struct timeval t;
 }
 
 #ifdef DEBUG
-static diropargs			dbg_diropargs;
-static struct sockaddr_in	dbg_server;
+diropargs			dbg_diropargs;
+struct sockaddr_in	dbg_server;
 #endif
 
 int
@@ -158,10 +158,16 @@ struct fhstatus		fhstat;
 
 #ifdef DEBUG
 	else {
+		extern void *dbgFhP;
+
 		assert( sizeof(dbg_diropargs.dir) ==
 				sizeof(fhstat.fhstatus_u.fhs_fhandle) );
 		memcpy(
 			&dbg_diropargs.dir,
+			fhstat.fhstatus_u.fhs_fhandle,
+			sizeof(dbg_diropargs.dir));
+		memcpy(
+			dbgFhP,
 			fhstat.fhstatus_u.fhs_fhandle,
 			sizeof(dbg_diropargs.dir));
 	}

@@ -1,6 +1,9 @@
 #include <rtems.h>
 #include <rtems/libio.h>
+#include <rtems/seterr.h>
 #include <string.h>
+#include <stdio.h>
+#include <assert.h>
 
 #include <nfs_prot.h>
 
@@ -16,7 +19,15 @@
 #define NFS_VERSION_2					NFS_VERSION
 
 #define CONFIG_NFS_BIG_XACT_SIZE		UDPMSGSIZE
-#define CONFIG_NFS_SMALL_XACT_SIZE		512
+#define CONFIG_NFS_SMALL_XACT_SIZE		UDPMSGSIZE
+#define NFSCALL_TIMEOUT					_nfscalltimeout
+#define NFSCALL_RETRYPERIOD				_nfscallretry
+
+#undef  TSILLDEBUG
+#define STATIC
+
+static struct timeval _nfscalltimeout = { 10, 0 };
+static struct timeval _nfscallretry   = { 1,  0 };
 
 /* 'time()' hack with less overhead;
  * 
@@ -25,6 +36,7 @@
 #define READ_LONG_IS_ATOMIC
 
 typedef rtems_unsigned32	TimeStamp;
+
 
 static inline TimeStamp
 nowSeconds(void)
@@ -152,6 +164,43 @@ typedef struct NfsNodeRec_ {
 	serporid	serporid;
 } NfsNodeRec, *NfsNode;
 
+/* Per mounted FS structure */
+typedef struct NfsRec_ {
+	RpcServer	server;
+} NfsRec, *Nfs;
+
+#define SERP_ARGS(node) ((node)->serporid.serporid_u.serporid.arg_u)
+#define SERP_ATTR(node) ((node)->serporid.serporid_u.serporid.attributes)
+#define SERP_FILE(node) ((node)->serporid.serporid_u.serporid.file)
+
+#ifndef TSILLDEBUG
+NfsNodeRec	dbgRoot;
+nfs_fh		*dbgFhP = &SERP_FILE(&dbgRoot);
+Nfs			dbgNfs;
+#endif
+
+static RpcUdpXactPool smallPool = 0;
+static RpcUdpXactPool bigPool   = 0;
+
+Nfs
+nfsCreate(struct sockaddr_in *psa)
+{
+Nfs rval = malloc(sizeof(*rval));
+
+	if (rval)
+		rval->server = rpcServerCreate(
+							psa,
+							NFSCALL_RETRYPERIOD);
+	return rval;
+}
+
+void
+nfsDestroy(Nfs nfs)
+{
+	rpcServerDestroy(nfs->server);
+	free(nfs);
+}
+
 static NfsNode
 nfsNodeAlloc(void)
 {
@@ -159,15 +208,6 @@ NfsNode	rval = malloc(sizeof(*rval));
 
 	return rval;
 }
-
-/* Per mounted FS structure */
-struct NfsRec_ {
-	RpcServer	server;
-	rtems_id	xbox;		/* a box containing a number of RPC transactions */
-} NfsRec, *Nfs;
-
-static RpcUdpXactPool smallPool = 0;
-static RpcUdpXactPool bigPool   = 0;
 
 /* get a transaction for a mounted nfs
  * a limited number are hold in the xbox;
@@ -190,7 +230,11 @@ nfsNodeFree(NfsNode node)
 
 void
 nfsInit(int smallPoolDepth, int bigPoolDepth)
-{
+{  
+#ifndef TSILLDEBUG
+	extern struct sockaddr_in dbg_server;
+	dbgNfs = nfsCreate(&dbg_server);
+#endif
 	if (0==smallPoolDepth)
 		smallPoolDepth = 20;
 	if (0==bigPoolDepth)
@@ -213,6 +257,9 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 void
 nfsCleanup(void)
 {
+#ifndef TSILLDEBUG
+	nfsDestroy(dbgNfs);
+#endif
 	rpcUdpXactPoolDestroy(smallPool);
 	rpcUdpXactPoolDestroy(bigPool);
 }
@@ -220,6 +267,19 @@ nfsCleanup(void)
 /*
  * File system types
  */
+
+#if 0 /* for reference */
+
+struct rtems_filesystem_location_info_tt
+{
+   void                                 *node_access;
+   rtems_filesystem_file_handlers_r     *handlers;
+   rtems_filesystem_operations_table    *ops;
+   rtems_filesystem_mount_table_entry_t *mt_entry;
+};
+
+#endif
+
 
 /*
  *  XXX
@@ -235,7 +295,96 @@ nfsCleanup(void)
  * calling this routine
  */
 
-static int nfs_evalpath(
+int
+nfscallSmall(
+	RpcServer	srvr,
+	int			proc,
+	xdrproc_t	xargs,
+	void *		pargs,
+	xdrproc_t	xres,
+	void *		pres)
+{
+RpcUdpXact		xact;
+enum clnt_stat	stat;
+int				rval=-1;
+ 
+	xact = rpcUdpXactPoolGet(smallPool, XactGetCreate);
+
+	if ( RPC_SUCCESS != (stat=rpcUdpSend(
+								xact,
+								srvr,
+								NFSCALL_TIMEOUT,
+								proc,
+								xres,
+								pres,
+								xargs,
+								pargs,
+								0)) ||
+	     RPC_SUCCESS != (stat=rpcUdpRcv(xact)) ){
+
+		switch (stat) {
+			/* TODO: this is probably not complete and/or fully accurate */
+			case RPC_CANTENCODEARGS : errno = EINVAL;	break;
+			case RPC_AUTHERROR  	: errno = EPERM;	break;
+
+			case RPC_CANTSEND		:
+			case RPC_CANTRECV		: /* hope they have errno set */
+			case RPC_SYSTEMERROR	: break;
+
+			default             	: errno = EIO;		break;
+		}
+	} else {
+		if (NFS_OK == (errno=*(nfsstat*)pres)) {
+			rval = 0;
+		}
+	}
+
+	/* release the transaction back into the pool */
+	rpcUdpXactPoolPut(xact);
+
+	return rval;
+}
+
+int
+lk1(char *name)
+{
+diropres			res;
+fattr				*f;
+enum clnt_stat		stat;
+extern diropargs dbg_diropargs;
+
+
+	dbg_diropargs.name=name;
+	if (nfscallSmall(dbgNfs->server,
+				NFSPROC_LOOKUP,
+				xdr_diropargs, &dbg_diropargs,
+				xdr_diropres,  &res
+				)) {
+		fprintf(stderr,"Error %s\n", strerror(errno));
+		goto cleanup;
+	}
+
+	if (res.status) {
+		fprintf(stderr,"NFS Error %i (?%s?)\n", res.status, strerror(res.status));
+		goto cleanup;
+	}
+	f = &res.diropres_u.diropres.attributes;
+	fprintf(stderr,"type   %i\n", f->type);
+	fprintf(stderr,"mode   %i\n", f->mode);
+	fprintf(stderr,"nlink  %i\n", f->nlink);
+	fprintf(stderr,"fileid %i\n", f->fileid);
+	fprintf(stderr,"uid    %i\n", f->uid);
+	if (NFDIR == f->type)
+		memcpy( &dbg_diropargs.dir,
+				&res.diropres_u.diropres.file,
+				sizeof(dbg_diropargs.dir));
+
+cleanup:
+	xdr_free(xdr_diropres,(void*)&res);
+
+}
+
+STATIC int nfs_evalpath(
 	const char                        *pathname,      /* IN     */
 	int                                flags,         /* IN     */
 	rtems_filesystem_location_info_t  *pathloc        /* IN/OUT */
@@ -245,11 +394,24 @@ char		*p = strdup(pathname);
 char		*del, *part;
 NfsNode		node=nfsNodeAlloc();
 int			e;
+#ifndef TSILLDEBUG
+#warning TSILLDEBUG still unset
+RpcServer	server = dbgNfs->server;
+#else
+RpcServer	server = ((Nfs)pathloc->mt_entry->fs_info)->server;
+#endif
 
 	if (!p || !node) {
 		e = ENOMEM;
 		goto bailout;
 	}
+
+#ifndef TSILLDEBUG
+	/* copy the start node */
+	memcpy(node, pathloc, sizeof(*node));
+#else
+	memcpy(node, pathloc->node_access, sizeof(*node));
+#endif
 
 	for (part=p; p && *p; p=del) {
 		/* find delimiter and eat /// sequences */
@@ -258,10 +420,29 @@ int			e;
 				*del++=0;
 			} while (DELIM==*del);
 		}
+
 		/* lookup one element */
+		SERP_ARGS(node).diroparg.name = p;
+
+		if (nfscallSmall(server,
+						 NFSPROC_LOOKUP,
+						 xdr_diropargs,
+						 &SERP_FILE(node),
+						 xdr_serporid,
+						 &node->serporid)) {
+			e = errno;
+			goto bailout;
+		}
 	}
 
 	free(p);
+#ifndef TSILLDEBUG
+	fprintf(stderr,"Type %i, ino %i\n",
+					SERP_ATTR(node).type,
+					SERP_ATTR(node).fileid);
+	nfsNodeFree(node);
+#endif
+
 	pathloc->node_access = node;
 	return 0;
 
