@@ -226,7 +226,7 @@ struct mbuf *m = mbp->mchain;
 static bool_t
 xdrmbuf_getlong_aligned(register XDR *xdrs, register long *lp)
 {
-	while ((xdrs->x_handy -= sizeof(int32_t)) < 0) {
+	while ( (signed int)(xdrs->x_handy -= sizeof(int32_t)) < 0) {
 		if ((xdrs->x_handy += sizeof(int32_t)) == 0) {
 			/* handy was 0 on entry; request a new buffer.
 			 * Coded this way, so the most frequently executed
