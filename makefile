@@ -7,7 +7,7 @@ CFLAGS = -O2 $(DEFS) $(INCS) -g
 ifdef RTEMS
 CC = powerpc-rtems-gcc
 LD = powerpc-rtems-ld
-TARG = m.obj
+TARG = nfs.obj
 else
 TARG = m
 endif
@@ -21,8 +21,8 @@ m: mnt.o rpcio.o
 %.o: %.c
 	$(CC) -c -o $@ $(CFLAGS) $^
 
-m.obj: nfs.o
-	$(LD) -o $@ -r $^
+nfs.obj: nfs.o
+	$(LD) -o $@ -r -Lproto $^ -lnfsprot
 
 clean:
 	$(RM) *.o m *.obj

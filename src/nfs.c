@@ -94,19 +94,16 @@ static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
  * recompiled.
  */
 
-#ifndef	INO_T_IS_4_BYTES
-#warning using short st_ino hits performance and may fail to access/find correct files
-#define	NFS_MAKE_DEV_T(node) \
+#define	NFS_MAKE_DEV_T_INO_HACK(node) \
 		rtems_filesystem_make_dev_t( NFS_MAJOR, \
 			(((node)->nfs->id)<<16) | (SERP_ATTR((node)).fileid >> 16) )
-#else
+
 /* use our 'nfs id' and the server's fsid for the minor device number
  * this should be fairly unique
  */
 #define	NFS_MAKE_DEV_T(node) \
 		rtems_filesystem_make_dev_t( NFS_MAJOR, \
 			(((node)->nfs->id)<<16) | (SERP_ATTR((node)).fsid & ((1<<16)-1)) )
-#endif
 
 #define  DIRENT_HEADER_SIZE ( sizeof(struct dirent) - \
 			sizeof( ((struct dirent *)0)->d_name ) )
@@ -121,8 +118,7 @@ static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
 #define DEBUG_READDIR		(1<<3)
 #define DEBUG_SYSCALLS		(1<<4)
 
-#define DEBUG  ( DEBUG_COUNT_NODES | DEBUG_TRACK_NODES | DEBUG_EVALPATH )
-#undef  DEBUG
+#define DEBUG	( DEBUG_SYSCALLS | DEBUG_COUNT_NODES )
 
 #ifdef DEBUG
 #define STATIC
@@ -503,6 +499,58 @@ typedef struct NfsNodeRec_ {
 	TimeStamp		age;
 } NfsNodeRec, *NfsNode;
 
+/*****************************************
+	Forward Declarations
+ *****************************************/
+
+static int nfs_do_eval_link(
+	rtems_filesystem_location_info_t *pathloc,
+	void                              *arg,
+	int								  forMake
+);
+
+static int nfs_readlink(
+	rtems_filesystem_location_info_t  *loc,     	/* IN  */       
+	char							  *buf,			/* OUT */
+	size_t							  len
+);
+
+static int updateAttr(NfsNode node, int force);
+
+/* Mask bits when setting attributes.
+ * Only the 'arg' fields with their
+ * corresponding bit set in the mask
+ * will be used. The others are left
+ * unchanged.
+ * The 'TOUCH' bits instruct nfs_sattr()
+ * to update the respective time
+ * fields to the current time
+ */
+#define	SATTR_MODE		(1<<0)
+#define	SATTR_UID		(1<<1)
+#define	SATTR_GID		(1<<2)
+#define	SATTR_SIZE		(1<<3)
+#define	SATTR_ATIME		(1<<4)
+#define	SATTR_TOUCHA	(1<<5)
+#define	SATTR_MTIME		(1<<6)
+#define	SATTR_TOUCHM	(1<<7)
+#define SATTR_TOUCH		(SATTR_TOUCHM | SATTR_TOUCHA)
+
+static int
+nfs_sattr(NfsNode node, sattr *arg, u_long mask);
+
+extern struct _rtems_filesystem_operations_table nfs_fs_ops;
+extern struct _rtems_filesystem_file_handlers_r	 nfs_file_file_handlers;
+extern struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
+extern struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
+extern		   rtems_driver_address_table		 drvNfs;
+
+
+/*****************************************
+	Inline Routines
+ *****************************************/
+
+
 /* * * * * * * * * * * * * * * * * *
 	Trivial Operations on a NfsNode 
  * * * * * * * * * * * * * * * * * */
@@ -554,51 +602,6 @@ NfsNode nb;
 }
 
 
-/*****************************************
-	Forward Declarations
- *****************************************/
-
-static int nfs_do_eval_link(
-	rtems_filesystem_location_info_t *pathloc,
-	void                              *arg,
-	int								  forMake
-);
-
-static int nfs_readlink(
-	rtems_filesystem_location_info_t  *loc,     	/* IN  */       
-	char							  *buf,			/* OUT */
-	size_t							  len
-);
-
-static int updateAttr(NfsNode node, int force);
-
-/* Mask bits when setting attributes.
- * Only the 'arg' fields with their
- * corresponding bit set in the mask
- * will be used. The others are left
- * unchanged.
- * The 'TOUCH' bits instruct nfs_sattr()
- * to update the respective time
- * fields to the current time
- */
-#define	SATTR_MODE		(1<<0)
-#define	SATTR_UID		(1<<1)
-#define	SATTR_GID		(1<<2)
-#define	SATTR_SIZE		(1<<3)
-#define	SATTR_ATIME		(1<<4)
-#define	SATTR_TOUCHA	(1<<5)
-#define	SATTR_MTIME		(1<<6)
-#define	SATTR_TOUCHM	(1<<7)
-#define SATTR_TOUCH		(SATTR_TOUCHM | SATTR_TOUCHA)
-
-static int
-nfs_sattr(NfsNode node, sattr *arg, u_long mask);
-
-extern struct _rtems_filesystem_operations_table nfs_fs_ops;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_file_file_handlers;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
-extern		   rtems_driver_address_table		 drvNfs;
 
 /*****************************************
 	Global Variables
@@ -916,6 +919,14 @@ entry	dummy;
 							MUTEX_ATTRIBUTES,
 							0,
 							&nfsGlob.lock) );
+
+	if (sizeof(ino_t) < sizeof(u_int)) {
+		fprintf(stderr,
+				"WARNING: Using 'short st_ino' hits performance and may fail to access/find correct files\n");
+		fprintf(stderr,
+				"you should fix newlib's sys/stat.h - for now I'll enable a hack...\n");
+
+	}
 }
 
 /* Driver cleanup code
@@ -1317,7 +1328,7 @@ RpcUdpServer	server = nfs->server;
 
 		/* refuse to backup over the root */
 		if ( 0==strcmp(part,UPDIR)
-			 && locAreEqual(pathloc, rtems_filesystem_root) ) {
+			 && locAreEqual(pathloc, &rtems_filesystem_root) ) {
 			part++;
 		}
 
@@ -2416,6 +2427,16 @@ Nfs		nfs  = node->nfs;
 		rtems_set_errno_and_return_minus_one(rr.status);
 	}
 
+#if DEBUG & DEBUG_SYSCALLS
+	fprintf(stderr,
+			"Read %i (asked for %i) bytes from offset %i to 0x%08x\n",
+			rr.readres_u.reply.data.data_len,
+			count,
+			iop->offset,
+			rr.readres_u.reply.data.data_val);
+#endif
+
+
 	return rr.readres_u.reply.data.data_len;
 }
 
@@ -2545,8 +2566,16 @@ static int nfs_file_lseek(
 	int            whence
 )
 {
+#if DEBUG & DEBUG_SYSCALLS
+	fprintf(stderr,
+			"lseek to %i (length %i, whence %i)\n",
+			iop->offset,
+			length,
+			whence);
+#endif
+
 	/* this is particularly easy :-) */
-	return 0;
+	return iop->offset;
 }
 
 static int nfs_dir_lseek(
@@ -2572,7 +2601,7 @@ DirInfo di = iop->file_info;
 
 	di->eofreached = FALSE;
 
-	return 0;
+	return iop->offset;
 }
 
 #define nfs_link_lseek 0
@@ -2633,15 +2662,22 @@ static int nfs_fstat(
 NfsNode	node = loc->node_access;
 fattr	*fa  = &SERP_ATTR(node);
 
-	if (updateAttr(node, 0 /* only if old */))
+	if (updateAttr(node, 0 /* only if old */)) {
 		return -1;
+	}
 
 /* done by caller 
 	memset(buf, 0, sizeof(*buf));
  */
 
 	/* translate */
+
+	/* one of the branches hopefully is optimized away */
+	if (sizeof(ino_t) < sizeof(u_int)) {
+	buf->st_dev		= NFS_MAKE_DEV_T_INO_HACK((NfsNode)loc->node_access);
+	} else {
 	buf->st_dev		= NFS_MAKE_DEV_T((NfsNode)loc->node_access);
+	}
 	buf->st_mode	= fa->mode;
 	buf->st_nlink	= fa->nlink;
 	buf->st_uid		= fa->uid;
@@ -2738,7 +2774,10 @@ u_int					mode;
 						xdr_sattrargs,	&SERP_FILE(node),
 						xdr_attrstat,	&node->serporid) ) {
 #if DEBUG & DEBUG_SYSCALLS
-		perror("nfs_sattr (mask 0x%08x)",mask);
+		fprintf(stderr,
+				"nfs_sattr (mask 0x%08x): %s",
+				mask,
+				strerror(errno));
 #endif
 		return -1;
 	}
