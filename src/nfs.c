@@ -3114,7 +3114,7 @@ char									*dev =  0;
 		return -1;
 	}
 
-	if ( !(dev = malloc((devl=20+strlen(path)+1))) ) {
+	if ( !(dev = malloc((devl=strlen(uidhost) + 20 + strlen(path)+1))) ) {
 		fprintf(stderr,"nfsMount: out of memory\n");
 		return -1;
 	}
