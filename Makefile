@@ -1,14 +1,9 @@
 #
 #  $Id$
 #
-D=$$
-REVISION=$(patsubst $DName:%$D,%,$$Name$$)
+REVISION=$(filter-out $$%,$$Name$$)
 
 include $(RTEMS_MAKEFILE_PATH)/Makefile.inc
-
-
-#$(RECURSE_TARGETS):
-#	echo $@
 
 include $(RTEMS_CUSTOM)
 RECURSE_TARGETS += tar-recursive
@@ -22,6 +17,5 @@ tar: tar-recursive
         exit 1;\
     else \
         echo tarring revision $(REVISION);\
+        tar Xcfz tarexcl $(REVISION).tgz -C .. $(shell basename `pwd`) ;\
     fi
-
-#        tar Xcfz tarexcl $(REVISION).tgz -C .. $(shell basename `pwd`) ;\
