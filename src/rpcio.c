@@ -56,6 +56,7 @@
  
 #include <rtems.h>
 #include <stdlib.h>
+#include <time.h>
 #include <rpc/rpc.h>
 #include <rpc/pmap_prot.h>
 #include <errno.h>
@@ -1093,9 +1094,9 @@ RpcUdpServer      srv;
 rtems_interval    next_retrans, then, unow;
 long			  now;	/* need to do signed comparison with age! */
 rtems_event_set   events;
-rtems_id          q;
 ListNode          newList;
 rtems_unsigned32  size;
+rtems_id          q          =  0;
 ListNodeRec       listHead   = {0};
 unsigned long     epoch      = RPCIOD_EPOCH_SECS * ticksPerSec;
 unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
@@ -1427,27 +1428,6 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 	rtems_semaphore_release(fini);
 	rtems_task_suspend(RTEMS_SELF);
-}
-
-/* CEXP module support (magic init) */
-static void
-_cexpModuleInitialize(void *mod)
-{
-/* use this ugly construct to silence compiler warnings
- * about '_cexpModuleInitialize' being unused...
- */ do { } while (0 && _cexpModuleInitialize);
-
-	rpcUdpInit();
-}
-
-static int
-_cexpModuleFinalize(void *mod)
-{
-/* use this ugly construct to silence compiler warnings
- * about '_cexpModuleFinalize' being unused...
- */ do { } while (0 && _cexpModuleFinalize);
-
-	return rpcUdpCleanup();
 }
 
 

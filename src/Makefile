@@ -10,7 +10,7 @@
 HAVE_CEXP=NO
 
 # C source names, if any, go here -- minus the .c
-C_PIECES_YES=rpcio nfs dirutils
+C_PIECES_YES=rpcio nfs dirutils rpcio.modini nfs.modini
 C_PIECES_NO=rpcio nfs
 
 C_PIECES=$(C_PIECES_$(HAVE_CEXP))
@@ -23,7 +23,8 @@ CC_PIECES=
 CC_FILES=$(CC_PIECES:%=%.cc)
 CC_O_FILES=$(CC_PIECES:%=${ARCH}/%.o)
 
-H_FILES=
+H_FILES=librtemsNfs.h rpcio.h
+INST_HEADERS=librtemsNfs.h
 
 # Assembly source names, if any, go here -- minus the .S
 S_PIECES=
@@ -79,10 +80,10 @@ ifndef RTEMS_SITE_INSTALLDIR
 RTEMS_SITE_INSTALLDIR = $(PROJECT_RELEASE)
 endif
 
-%nfs.obj: %nfs.o
+%nfs.obj: %nfs.o %nfs.modini.o
 	$(LD_FOR_TARGET) -r -o $@ $^ -L../proto/$(ARCH) -lnfsprot
 
-%rpcio.obj: %rpcio.o %sock_mbuf.o %xdr_mbuf.o
+%rpcio.obj: %rpcio.o %sock_mbuf.o %xdr_mbuf.o %rpcio.modini.o
 	$(LD_FOR_TARGET) -r -o $@ $^
 
 %dirutils.obj: %dirutils.o
@@ -100,3 +101,4 @@ tar:
 install:  all
 	$(INSTALL_VARIANT) -m 555 ${PGMS} ${RTEMS_SITE_INSTALLDIR}/bin
 	$(INSTALL_VARIANT) -m 555 ${LIB}  ${RTEMS_SITE_INSTALLDIR}/lib
+	$(INSTALL_VARIANT) -m 555 ${INST_HEADERS}  ${RTEMS_SITE_INSTALLDIR}/include

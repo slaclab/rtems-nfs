@@ -253,7 +253,7 @@ union	{
 struct dirent	*pde = (struct dirent *)di->ptr;
 u_int			fileid;
 char			*name;
-register int	nlen,len,naligned;
+register int	nlen = 0,len,naligned = 0;
 nfscookie		*pcookie;
 
 	len = di->len;
@@ -1018,29 +1018,6 @@ int			refuse;
 	return 0;
 }
 
-/* CEXP dynamic loader support */
-static void
-_cexpModuleInitialize(void *mod)
-{	
-/* use this ugly construct to silence compiler warnings
- * about this routine being unused
- */ do {} while ( 0 && _cexpModuleInitialize);
-
-	nfsInit(0,0);
-}
-
-
-static int
-_cexpModuleFinalize(void *mod)
-{	
-/* use this ugly construct to silence compiler warnings
- * about this routine being unused
- */ do {} while ( 0 && _cexpModuleFinalize);
-
-	return nfsCleanup();
-}
-
-
 /* NFS RPC wrapper.
  *
  * ARGS:	srvr	the NFS server we want to call
@@ -1335,8 +1312,8 @@ STATIC int nfs_do_evalpath(
 	int								  forMake
 )
 {
-char			*del, *part;
-int				e;
+char			*del = 0, *part;
+int				e = 0;
 NfsNode			node   = pathloc->node_access;
 char			*p     = malloc(MAXPATHLEN+1);
 Nfs				nfs    = (Nfs)pathloc->mt_entry->fs_info;
