@@ -10,8 +10,8 @@
 HAVE_CEXP=NO
 
 # C source names, if any, go here -- minus the .c
-C_PIECES_YES=rpcio nfs dirutils rpcio.modini nfs.modini
-C_PIECES_NO=rpcio nfs
+C_PIECES_YES=rpcio nfs sock_mbuf xdr_mbuf dirutils rpcio.modini nfs.modini
+C_PIECES_NO=rpcio nfs sock_mbuf xdr_mbuf
 
 C_PIECES=$(C_PIECES_$(HAVE_CEXP))
 
@@ -32,10 +32,9 @@ S_FILES=$(S_PIECES:%=%.S)
 S_O_FILES=$(S_FILES:%.S=${ARCH}/%.o)
 
 SRCS=$(C_FILES) $(CC_FILES) $(H_FILES) $(S_FILES)
-OBJS=$(C_O_FILES) $(CC_O_FILES) $(S_O_FILES)
+OBJS=$(C_O_FILES) $(CC_O_FILES) $(S_O_FILES) $(wildcard ../proto/$(ARCH)/*.o)
 
 PGMS=${ARCH}/nfs.obj ${ARCH}/rpcio.obj ${ARCH}/dirutils.obj 
-LIBOBJS=$(ARCH)/nfs.o $(ARCH)/rpcio.o
 
 LIBNAME=librtemsNfs.a
 
@@ -89,7 +88,7 @@ endif
 %dirutils.obj: %dirutils.o
 	$(LD) -r -o $@ $^
 
-$(LIB): $(LIBOBJS)
+$(LIB): $(OBJS)
 	$(make-library)
 
 all:	${ARCH} $(SRCS) $(PGMS) $(LIB)
