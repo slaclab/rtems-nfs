@@ -1,0 +1,9 @@
+Changes since RTEMS-NFS 1.3.beta
+date: 2003/10/17 22:27:53;  author: till;  state: Exp;  lines: +20 -4
+ RPCIO:
+ - Relaxed paranoia check / ASSERTion failure:
+   paranoia_free() is called more than once on an ext_buf - it must
+   undo calls to paranoia_refcnt() - hence the 0 == --refcnt check
+   is too strict.
+ - Added a DEBUG flag to introduce random packet losses for testing
+   retransmission.
