@@ -40,9 +40,41 @@
 #define NFSCALL_RETRYPERIOD				_nfscallretry
 #define MNTCALL_RETRYPERIOD				_nfscallretry
 
+
+/* TODO: we should get a proper device identifier for THIS fs... */
+/* NOTE: RTEMS uses short st_ino :-(. Therefore, we merge the
+ * upper 16bit of the fileid into the device no. This has an impact
+ * on performance, as e.g. getcwd() stats() all directory entries
+ * when it believes it has crossed a mount point (a.st_dev != b.st_dev)
+ */
+#define NFS_MAJOR	0xcafe
+#warning TSILL need to fix device type
+#ifndef	INO_T_IS_4_BYTES
+#warning using short st_ino hits performance and may fail to access/find correct files
+#define	NFS_MAKE_DEV_T(node) \
+		rtems_filesystem_make_dev_t( NFS_MAJOR, \
+						(((node)->nfs->id)<<16) | (SERP_ATTR((node)).fileid >> 16) )
+#else
+/* TODO: should probably work in the server's fsid somehow */
+#define	NFS_MAKE_DEV_T(node) \
+		rtems_filesystem_make_dev_t( NFS_MAJOR, (((node)->nfs->id)<<16) )
+#endif
+
 #undef  TSILLDEBUG
+
+#define DEBUG_COUNT_NODES	(1<<0)
+#define DEBUG_TRACK_NODES	(1<<1)
+#define DEBUG_EVALPATH		(1<<2)
+#define DEBUG_READDIR		(1<<3)
+#define DEBUG_UNLINK		(1<<4)
+
+#define DEBUG  ( DEBUG_COUNT_NODES | DEBUG_UNLINK )
+
+#ifdef DEBUG
 #define STATIC
-#define DEBUG
+#else
+#define STATIC static
+#endif
 
 #define MUTEX_ATTRIBUTES    (RTEMS_LOCAL           | \
                             RTEMS_PRIORITY         | \
@@ -352,7 +384,10 @@ typedef struct NfsRec_ {
 } NfsRec, *Nfs;
 
 typedef struct NfsNodeRec_ {
-	serporid	serporid;
+	diropres	res;		/* we must remember the directory where evalpath
+							 * found this entry for unlink/rmnod etc.
+							 */
+	serporid	args;
 	Nfs			nfs;		/* fs this node belongs to */
 } NfsNodeRec, *NfsNode;
 
@@ -398,8 +433,8 @@ nfsNodeCreate(Nfs nfs, nfs_fh *fh)
 {
 NfsNode	rval = malloc(sizeof(*rval));
 
-#ifdef DEBUG
-fprintf(stderr,"NFS: creating a node\n");
+#if DEBUG & DEBUG_TRACK_NODES
+	fprintf(stderr,"NFS: creating a node\n");
 #endif
 
 	if (rval) {
@@ -425,8 +460,8 @@ fprintf(stderr,"NFS: creating a node\n");
 static void
 nfsNodeDestroy(NfsNode node)
 {
-#ifdef DEBUG
-fprintf(stderr,"NFS: destroying a node\n");
+#if DEBUG & DEBUG_TRACK_NODES
+	fprintf(stderr,"NFS: destroying a node\n");
 #endif
 #if 0
 	if (!node)
@@ -781,7 +816,7 @@ RpcUdpServer	server = nfs->server;
 				while (0==*--del)
 					*del=DELIM;
 			}
-#ifdef DEBUG
+#if DEBUG & DEBUG_EVALPATH
 			fprintf(stderr,
 					"Sending '%s' for evaluation across mount point\n",
 					part);
@@ -793,15 +828,13 @@ RpcUdpServer	server = nfs->server;
 		/* lookup one element */
 		SERP_ARGS(node).diroparg.name = part;
 
-#ifdef DEBUG
+#if DEBUG & DEBUG_EVALPATH
 		fprintf(stderr,"Looking up '%s'\n",part);
 #endif
 		if (nfscallSmall(server,
 						 NFSPROC_LOOKUP,
-						 xdr_diropargs,
-						 &SERP_FILE(node),
-						 xdr_serporid,
-						 &node->serporid)) {
+						 xdr_diropargs, &SERP_FILE(node),
+						 xdr_serporid,  &node->serporid)) {
 			e = errno ? errno : EIO;
 			goto cleanup;
 		} else {
@@ -854,7 +887,9 @@ cleanup:
 		nfsNodeDestroy(node);
 		pathloc->node_access = 0;
 	}
-fprintf(stderr,"leaving evalpath, in use count is %i\n",nfs->nodesInUse);
+#if DEBUG & DEBUG_COUNT_NODES
+	fprintf(stderr,"leaving evalpath, in use count is %i\n",nfs->nodesInUse);
+#endif
 	if (e)
 		rtems_set_errno_and_return_minus_one(e);
 	else
@@ -884,17 +919,86 @@ static int nfs_link(
 #endif
 
 static int nfs_unlink(
-	rtems_filesystem_location_info_t  *pathloc       /* IN */
+	rtems_filesystem_location_info_t  *loc       /* IN */
 )
 {
-nfsstat	status;
-Nfs					nfs  = loc->mt_entry->fs_info;
-NfsNode				node = loc->node_access;
-	/* TODO we have to lookup pathloc in the parent directory
-	 * to find its name.
-	 * The FS generics have determined, however, that pathloc
-	 * is _not_ a directory
+nfsstat			status;
+NfsNode			parent;
+struct dirent	*pent;
+struct stat		sb;
+NfsNode			node = loc->node_access;
+Nfs				nfs  = node->nfs;
+int				rval = -1;
+DIR				*dp  = 0;
+
+	/* We have to lookup pathloc in the parent directory
+	 * to find its name - NFS needs the parent node + the
+	 * child's name :-(
 	 */
+
+	/* The FS generics have determined that pathloc is _not_
+	 * a directory. Hence we may assume that the parent
+	 * is in our NFS
+	 */
+	if ( !(dp = opendir(".")) )
+		return -1;
+
+	/* now we must search the parent dir */
+	while ( (pent = readdir(dp)) ) {
+#if DEBUG & DEBUG_UNLINK
+		fprintf(stderr,"\nunlink: checking %s",pent->d_name);
+#endif
+		if (pent->d_ino == (ino_t) SERP_ATTR(node).fileid) {
+#if DEBUG & DEBUG_UNLINK
+			fprintf(stderr," ...inodes match");
+#endif
+#ifndef	INO_T_IS_4_BYTES
+			/* we must stat the entry and compare the device
+			 * entries as well :-(
+			 */
+			if (stat(pent->d_name, &sb))
+				goto cleanup;
+			if ( sb.st_dev != NFS_MAKE_DEV_T(node) ) {
+#if DEBUG & DEBUG_UNLINK
+				fprintf(stderr,"...device mismatch\n");
+#endif
+				continue;
+			}
+#endif
+			/* ok; this seems to be the correct one */
+#if DEBUG & DEBUG_UNLINK
+			fprintf(stderr,"...OK\n");
+#endif
+			break;
+		}
+	}
+
+	if (pent) {
+		/* move 'pathloc', 'nfs' and 'node' to the parent */
+		loc  = & rtems_libio_iop(dp->dd_fd)->pathinfo;
+		node = loc->node_access;
+		nfs  = node->nfs;
+
+		SERP_ARGS(node).diroparg.name = pent->d_name;
+
+		if ( nfscallSmall(nfs->server,
+						NFSPROC_REMOVE,
+						xdr_diropargs,	&SERP_FILE(node),
+						xdr_nfsstat,	&status) ) {
+			if (!errno)
+				errno = EIO;
+		} else if ( NFS_OK != status ) {
+				errno = status;
+		} else {
+			rval = 0;
+		}
+	}
+
+cleanup:
+	if (dp)
+		closedir(dp);
+	return rval;
+
 }
 
 #ifdef DECLARE_BODY
@@ -913,7 +1017,7 @@ static int nfs_freenode(
 	rtems_filesystem_location_info_t      *pathloc       /* IN */
 )
 {
-Nfs	nfs    = (Nfs)pathloc->mt_entry->fs_info;
+Nfs	nfs    = ((NfsNode)pathloc->node_access)->nfs;
 
 	/* never destroy the root node; it is released by the unmount
 	 * code
@@ -929,7 +1033,9 @@ Nfs	nfs    = (Nfs)pathloc->mt_entry->fs_info;
 		nfsNodeDestroy(pathloc->node_access);
 		pathloc->node_access = 0;
 	}
-fprintf(stderr,"leaving freenode, in use count is %i\n",nfs->nodesInUse);
+#if DEBUG & DEBUG_COUNT_NODES
+	fprintf(stderr,"leaving freenode, in use count is %i\n",nfs->nodesInUse);
+#endif
 	return 0;
 }
 
@@ -1164,7 +1270,6 @@ int					nodesInUse;
 		nfsStats.mounted_fs--;
 	UNLOCK(nfsStats.lock);
 
-fprintf(stderr,"Leaving umount_me op\n");
 	return 0;
 }
 
@@ -1261,8 +1366,8 @@ static int nfs_do_readlink(
 	strbuf							  *psbuf		/* IN/OUT */
 )
 {
-Nfs					nfs  = loc->mt_entry->fs_info;
 NfsNode				node = loc->node_access;
+Nfs					nfs  = node->nfs;
 readlinkres_strbuf	rr;
 int					wasAlloced;
 int					rval;
@@ -1311,8 +1416,9 @@ static int nfs_evaluate_link(
 	int                               flags        /* IN     */
 )
 {
-int	 	rval;
-strbuf	sbuf;
+int	 								rval;
+strbuf								sbuf;
+rtems_filesystem_location_info_t	locbuf;
 
 	/* let XDR allocate the proper string length */
 	sbuf.buf = 0;
@@ -1324,7 +1430,12 @@ strbuf	sbuf;
 	if ( nfs_do_readlink(pathloc, &sbuf) ) {
 		rval = -1;
 	} else {
-		rval = rtems_evaluate_path(sbuf.buf, flags, pathloc, 1);
+		/* evaluate path will allocate a new node, hence we must remember
+		 * the current one and free it eventually.
+		 */
+		locbuf = *pathloc;
+		rval = rtems_filesystem_evaluate_path(sbuf.buf, flags, pathloc, 1);
+		rtems_filesystem_freenode(&locbuf);
 	}
 
 	xdr_free(xdr_strbuf, (caddr_t)&sbuf);
@@ -1441,7 +1552,7 @@ static int nfs_file_read(
 )
 {
 NfsNode node = iop->pathinfo.node_access;
-Nfs		nfs  = iop->pathinfo.mt_entry->fs_info;
+Nfs		nfs  = node->nfs;
 readres	rr;
 
 	if (count > UDPMSGSIZE)
@@ -1507,7 +1618,7 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 
 	di->readdirargs.count = count;
 
-#ifdef DEBUG
+#if DEBUG & DEBUG_READDIR
 	fprintf(stderr,
 			"Readdir: asking for %i XDR bytes, buffer is %i\n",
 			count, di->len);
@@ -1640,30 +1751,13 @@ static int nfs_fstat(
 )
 {
 fattr *fa = &SERP_ATTR((NfsNode)loc->node_access);
-Nfs	nfs   = (Nfs)loc->mt_entry->fs_info;
 
 /* done by caller 
 	memset(buf, 0, sizeof(*buf));
  */
 
 	/* translate */
-	/* TODO: we should get a proper device identifier for THIS fs... */
-	/* NOTE: RTEMS uses short st_ino :-(. Therefore, we merge the
-	 * upper 16bit of the fileid into the device no. This has an impact
-	 * on performance, as e.g. getcwd() stats() all directory entries
-	 * when it believes it has crossed a mount point (a.st_dev != b.st_dev)
-	 */
-#ifndef	INO_T_IS_4_BYTES
-#warning using short st_ino hits performance
-#define INO_UPPER_BITS_HACK |(fa->fileid >> 16)
-#endif
-	/* TODO: should probably work in the server's fsid somehow */
-#warning TSILL need to fix device type
-	buf->st_dev		= rtems_filesystem_make_dev_t(
-							0xcafe,
-							(nfs->id << 16)
-							INO_UPPER_BITS_HACK
-							);
+	buf->st_dev		= NFS_MAKE_DEV_T((NfsNode)loc->node_access);
 	buf->st_mode	= fa->mode;
 	buf->st_nlink	= fa->nlink;
 	buf->st_uid		= fa->uid;
@@ -1781,7 +1875,7 @@ struct _rtems_filesystem_file_handlers_r nfs_file_file_handlers = {
 		nfs_file_fsync,			/* OPTIONAL; may be NULL */
 		nfs_file_fdatasync,		/* OPTIONAL; may be NULL */
 		nfs_file_fcntl,			/* OPTIONAL; may be NULL */
-		nfs_file_rmnod,			/* OPTIONAL; may be NULL */
+		nfs_unlink,				/* OPTIONAL; may be NULL */
 };
 
 static
@@ -1799,5 +1893,5 @@ struct _rtems_filesystem_file_handlers_r nfs_dir_file_handlers = {
 		nfs_dir_fsync,			/* OPTIONAL; may be NULL */
 		nfs_dir_fdatasync,		/* OPTIONAL; may be NULL */
 		nfs_dir_fcntl,			/* OPTIONAL; may be NULL */
-		nfs_dir_rmnod,			/* OPTIONAL; may be NULL */
+		nfs_unlink,				/* OPTIONAL; may be NULL */
 };

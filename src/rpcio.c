@@ -16,6 +16,8 @@
 #define XACT_HASHS		(1<<(LD_XACT_HASH))
 #define XACT_HASH_MSK	((XACT_HASHS)-1)
 
+#undef  DEBUG
+
 #ifdef __rtems
 #define RTEMS_NFS_EVENT		RTEMS_EVENT_30
 #define RPCIOD_RX_EVENT		RTEMS_EVENT_1
@@ -188,7 +190,9 @@ register int	i,j;
 			do {
 				i=(i+1) & XACT_HASH_MSK; /* cheap modulo */
 				if (!xactHashTbl[i]) {
-fprintf(stderr,"TSILL entering index %i, val %x\n",i,rval);
+#if DEBUG & 1
+					fprintf(stderr,"RPCIO: entering index %i, val %x\n",i,rval);
+#endif
 					xactHashTbl[i]=rval;
 					j=-1;
 					break;
@@ -215,7 +219,10 @@ rpcUdpXactDestroy(RpcUdpXact xact)
 {
 int i = xact->obuf.xid & XACT_HASH_MSK;
 
-fprintf(stderr,"TSILL removing index %i, val %x\n",i,xact);
+#if DEBUG & 1
+		fprintf(stderr,"RPCIO: removing index %i, val %x\n",i,xact);
+#endif
+
 		assert(xactHashTbl[i]==xact);
 
 		HASH_TBL_LOCK();
@@ -379,7 +386,8 @@ int					fromLen  = sizeof(fromAddr);
 				   0,
 				   (struct sockaddr*)&fromAddr, &fromLen);
 	if (len <= 0) {
-		fprintf(stderr,"RECV failed: %s\n",strerror(errno));
+		if (EAGAIN != errno)
+			fprintf(stderr,"RECV failed: %s\n",strerror(errno));
 		goto cleanup;
 	}
 
@@ -597,7 +605,10 @@ RpcBuf			 buf = 0;
 
 		if (events & RPCIOD_KILL_EVENT) {
 			int i;
-fprintf(stderr,"TSILL got KILL\n");
+
+#if DEBUG & 2
+			fprintf(stderr,"RPCIO: got KILL event\n");
+#endif
 
 			HASH_TBL_LOCK();
 			for (i=XACT_HASHS-1; i>=0; i--) {
@@ -629,7 +640,11 @@ fprintf(stderr,"TSILL got KILL\n");
 		 */
 
 		if (RPCIOD_RX_EVENT & events) {
-fprintf(stderr,"TSILL got RX\n");
+
+#if DEBUG & 2
+			fprintf(stderr,"RPCIO: got RX event\n");
+#endif
+
 			if (!buf)
 				buf=(RpcBuf)malloc(UDPMSGSIZE);
 			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
@@ -650,7 +665,11 @@ fprintf(stderr,"TSILL got RX\n");
 		now-=then;
 
 		if (RPCIOD_TX_EVENT & events) {
-fprintf(stderr,"TSILL got TX\n");
+
+#if DEBUG & 2
+			fprintf(stderr,"RPCIO: got TX event\n");
+#endif
+
 			while (RTEMS_SUCCESSFUL == rtems_message_queue_receive(
 											msgQ,
 											&xact,
@@ -692,7 +711,7 @@ fprintf(stderr,"TSILL got TX\n");
 						xact->status.re_errno = errno;
 						xact->status.re_status=RPC_CANTSEND;
 						/* wakeup requestor */
-fprintf(stderr,"SEND failure\n");
+						fprintf(stderr,"RPCIO: SEND failure\n");
 						rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
 					} else {
 						/* send successful; calculate retransmission time
@@ -726,7 +745,9 @@ fprintf(stderr,"SEND failure\n");
 		}
 
 		next_retrans = listHead.next ? ((RpcUdpXact)listHead.next)->age - now : RTEMS_NO_TIMEOUT;
-fprintf(stderr,"next timeout is %x\n",next_retrans);
+#if DEBUG & 4
+		fprintf(stderr,"RPCIO: next timeout is %x\n",next_retrans);
+#endif
 	}
 	/* close our socket; shut down the receiver */
 	close(ourSock);
