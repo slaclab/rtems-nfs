@@ -18,6 +18,17 @@
           1. The "Software", below, refers to RTEMS-NFS (in either source
              code, or binary form and accompanying documentation).  Each
              licensee is addressed as "you" or "Licensee."
+
+             RTEMS-NFS comprises all files under this directory with
+             the EXCEPTION OF
+                  src/sock_mbuf.c
+                  src/xdr_mbuf.c
+                  proto/mount_prot.x
+                  proto/nfs_prot.x
+             which are covered by the licenses described in the
+             LICENSE.NET and LICENSE.RPCXDR files (RTEMS source topdir)
+             and header comments in the mentioned files, respectively.
+
           2. The copyright holders shown above and their third-party
              licensors hereby grant Licensee a royalty-free nonexclusive
              license, subject to the limitations stated herein and U.S.
