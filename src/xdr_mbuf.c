@@ -227,12 +227,20 @@ static bool_t
 xdrmbuf_getlong_aligned(register XDR *xdrs, register long *lp)
 {
 	while ((xdrs->x_handy -= sizeof(int32_t)) < 0) {
-		/* uh-oh an aligned long spread over two MBUFS ??
-		 * let the unaligned handler deal with this rare
-		 * situation
-		 */
-		xdrs->x_handy += sizeof(int32_t);
-		return xdrmbuf_getlong_unaligned(xdrs,lp);
+		if ((xdrs->x_handy += sizeof(int32_t)) == 0) {
+			/* handy was 0 on entry; request a new buffer.
+			 * Coded this way, so the most frequently executed
+			 * path needs only one comparison...
+			 */
+			if (!xdrmbuf_next(xdrs))
+				return FALSE;
+		} else {
+			/* uh-oh an aligned long spread over two MBUFS ??
+			 * let the unaligned handler deal with this rare
+			 * situation.
+			 */
+			return xdrmbuf_getlong_unaligned(xdrs,lp);
+		}
 	}
 	*lp = ntohl(*(int32_t *)(xdrs->x_private));
 	xdrs->x_private += sizeof(int32_t);
@@ -324,7 +332,7 @@ register char *cp,*sp;
 			goto done;
 
 		} else {
-			/* not enouth data - copy as much as possible
+			/* not enough data - copy as much as possible
 			 * then get retrieve the next MBUF and start
 			 * over
 			 */
@@ -496,18 +504,25 @@ xdrmbuf_inline_aligned(xdrs, len)
 	register XDR *xdrs;
 	int len;
 {
-	fprintf(stderr,"TODO: xdrmbuf_inline_aligned() is unimplemented\n");
-	return 0;
-#if 0
-	int32_t *buf = 0;
+int32_t	*buf = 0;
+
+	if (xdrs->x_handy == 0 && !xdrmbuf_next(xdrs))
+		return 0;
 
 	if (xdrs->x_handy >= len) {
 		xdrs->x_handy -= len;
 		buf = (int32_t *) xdrs->x_private;
 		xdrs->x_private += len;
-	}
-	return (buf);
+#if DEBUG & DEBUG_VERB
+		fprintf(stderr,"Got %i aligned inline bytes at %x\n", len, buf);
 #endif
+	}
+#if DEBUG & DEBUG_VERB
+	else {
+		fprintf(stderr,"Skipped %i aligned inline bytes\n",len);
+	}
+#endif
+	return (buf);
 }
 
 static int32_t *
