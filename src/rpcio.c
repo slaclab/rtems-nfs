@@ -141,9 +141,12 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define DEBUG_EVENTS		(1<<1)
 #define DEBUG_MALLOC		(1<<2)
 #define DEBUG_TIMEOUT		(1<<3)
+#define DEBUG_PACKLOSS		(1<<4)	/* This introduces random, artificial packet losses to test retransmission */
+
+#define DEBUG_PACKLOSS_FRACT (0xffffffff/10)
 
 /* USE PARENTHESIS WHEN 'or'ing MULTIPLE FLAGS: (DEBUG_XX | DEBUG_YY) */
-#define DEBUG				0
+#define DEBUG				(DEBUG_PACKLOSS)
 
 /****************************************************************/
 /* END OF CONFIGURABLE SECTION                                  */
@@ -1549,7 +1552,8 @@ paranoia_free(caddr_t closure, u_int size)
 #if (DEBUG)
 RpcUdpXact xact = (RpcUdpXact)closure;
 int        len  = (int)XDR_GETPOS(&xact->xdrs);
-	ASSERT( 0 == -- xact->refcnt && size == len );
+
+	ASSERT( --xact->refcnt >= 0 && size == len );
 #endif
 }
 
@@ -1629,6 +1633,18 @@ RpcUdpXact			xact     = 0;
 			fprintf(stderr,"RECV failed: %s\n",strerror(errno));
 		goto cleanup;
 	}
+
+#if (DEBUG) & DEBUG_PACKLOSS
+	if ( (unsigned)rand() < DEBUG_PACKLOSS_FRACT ) {
+		/* lose packets once in a while */
+		static int xxx = 0;
+		if ( ++xxx % 16 == 0 )
+			fprintf(stderr,"DEBUG: dropped %i packets, so far...\n",xxx);
+		if ( ibuf )
+			bufFree( &ibuf );
+		continue;
+	}
+#endif
 
 	i = (xid=XID(ibuf)) & XACT_HASH_MSK;
 
