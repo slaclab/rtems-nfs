@@ -249,7 +249,10 @@ struct symlinkargs {
 };
 
 
-typedef opaque nfscookie[NFS_COOKIESIZE];
+/* TS, 10/21/2002; converted cookie to struct */
+struct nfscookie {
+ 	opaque data[NFS_COOKIESIZE];
+};
 
 /*
  * Arguments to readdir
