@@ -859,7 +859,7 @@ rtems_event_set		gotEvents;
 			return RPC_CANTSEND;
 		}
 		/* wakeup the rpciod */
-		fprintf(stderr,"INFO: refreshing my AUTH\n");
+		fprintf(stderr,"RPCIO INFO: refreshing my AUTH\n");
 		ASSERT( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
 	}
 
@@ -1014,7 +1014,7 @@ enum clnt_stat	stat;
 								xres, pres,
 								xargs, pargs,
 								0)) ) {
-			fprintf(stderr,"Send failed: %i\n",stat);
+			fprintf(stderr,"RPCIO Send failed: %i\n",stat);
 			return stat;
 		}
 		return rpcUdpRcv(xact);
@@ -1137,7 +1137,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 			}
 			MU_UNLOCK(hlock);
 			if (i>=0) {
-				fprintf(stderr,"There are still transactions circulating; I refuse to go away\n");
+				fprintf(stderr,"RPCIO There are still transactions circulating; I refuse to go away\n");
 				fprintf(stderr,"(1st in slot %i)\n",i);
 				rtems_semaphore_release(fini);
 			} else {
@@ -1250,7 +1250,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 					srv->timeouts++;
 
 #if (DEBUG) & DEBUG_TIMEOUT
-					fprintf(stderr,"XACT timed out; waking up requestor\n");
+					fprintf(stderr,"RPCIO XACT timed out; waking up requestor\n");
 #endif
 
 					ASSERT( RTEMS_SUCCESSFUL ==
@@ -1648,18 +1648,21 @@ RpcUdpXact			xact     = 0;
 	i = (xid=XID(ibuf)) & XACT_HASH_MSK;
 
 	if ( !(xact=xactHashTbl[i])                                             ||
-		   (     xact->obuf.xid               != xid
-#ifndef DEBUG
-			/* don't complain if it's just a late arrival of a retry */
-			  && xact->obuf.xid               != xid + XACT_HASHS
-			  && xact->obuf.xid               != xid + 2*XACT_HASHS
-#endif
-		   )                                                                ||
+		   xact->obuf.xid                     != xid                        ||
 		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
 		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
 
-		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
 		if (xact) {
+			if (xact->server->addr.sin_addr.s_addr == fromAddr.sin_addr.s_addr &&
+		        xact->server->addr.sin_port        == fromAddr.sin_port        &&
+			    ( xact->obuf.xid                   == xid + XACT_HASHS   ||
+				  xact->obuf.xid                   == xid + 2*XACT_HASHS    )
+				) {
+#ifndef DEBUG /* don't complain if it's just a late arrival of a retry */
+			fprintf(stderr,"RPCIO - FYI sockRcv(): dropping late/redundant retry answer\n");
+#endif
+			} else {
+			fprintf(stderr,"RPCIO WARNING sockRcv(): transaction mismatch\n");
 			fprintf(stderr,"xact: xid  0x%08lx  -- got 0x%08lx\n",
 							xact->obuf.xid, xid);
 			fprintf(stderr,"xact: addr 0x%08lx  -- got 0x%08lx\n",
@@ -1668,9 +1671,11 @@ RpcUdpXact			xact     = 0;
 			fprintf(stderr,"xact: port 0x%08x  -- got 0x%08x\n",
 							xact->server->addr.sin_port,
 							fromAddr.sin_port);
+			}
 		} else {
-			fprintf(stderr,"got xid 0x%08lx but its slot is empty\n",
-						xid);
+			fprintf(stderr,
+					"RPCIO WARNING sockRcv(): got xid 0x%08lx but its slot is empty\n",
+					xid);
 		}
 		/* forget about this one and try again */
 		xact = 0;
