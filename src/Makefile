@@ -93,6 +93,8 @@ $(LIB): $(LIBOBJS)
 
 all:	${ARCH} $(SRCS) $(PGMS) $(LIB)
 
+tar:
+
 # Install the program(s), appending _g or _p as appropriate.
 # for include files, just use $(INSTALL_CHANGE)
 install:  all

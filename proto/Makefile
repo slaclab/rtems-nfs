@@ -67,6 +67,8 @@ $(LIB): ${OBJS}
 
 .PRECIOUS: $(XFILES:%.x=%.h) $(XFILES:%.x=%_xdr.c)
 
+tar: $(XFILES:%.x=%.h) $(XFILES:%.x=%_xdr.c)
+
 distclean: clean
 
 # DONT install this library.
