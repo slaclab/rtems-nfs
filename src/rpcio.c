@@ -68,6 +68,7 @@ typedef struct RpcUdpXactRec_ {
 #ifdef __rtems
 		long				age;
 		rtems_id			requestor;
+		RpcUdpXactPool		pool;
 #endif
 		XDR					xdrs;
 		int					xdrpos;
@@ -78,6 +79,16 @@ typedef struct RpcUdpXactRec_ {
 		RpcBuf				ibuf;
 		RpcBufU				obuf;
 } RpcUdpXactRec;
+
+#ifdef __rtems
+typedef struct RpcUdpXactPoolRec_ {
+	rtems_id	box;
+	int			prog;
+	int			version;
+	int			xactSize;
+} RpcUdpXactPoolRec;
+#endif
+
 
 static RpcUdpXact xactHashTbl[XACT_HASHS]={0};
 
@@ -136,7 +147,7 @@ register int	i,j;
 	/* word align */
 	size = (size + 3) & ~3;
 
-	rval = (RpcUdpXact)malloc(sizeof(*rval) - sizeof(rval->obuf) + size);
+	rval = (RpcUdpXact)calloc(1,sizeof(*rval) - sizeof(rval->obuf) + size);
 
 	if (rval) {
 	
@@ -182,10 +193,6 @@ fprintf(stderr,"TSILL entering index %i, val %x\n",i,rval);
 		rval->obuf.xid  = (rval->obuf.xid << LD_XACT_HASH) | i;
 		rval->xdrpos    = XDR_GETPOS(&(rval->xdrs));
 		rval->obufsize  = size;
-		rval->ibuf	    = 0;
-		rval->ibufsize  = 0;
-		rval->node.next = 0;
-		rval->node.prev = 0;
 	}
 	return rval;
 }
@@ -751,6 +758,74 @@ _cexpModuleFinalize(void *mod)
 	rtems_task_delete(rpciod);
 	rtems_semaphore_delete(fini);
 	return (msgQ !=0);
+}
+
+RpcUdpXactPool
+rpcUdpXactPoolCreate(
+	int prog, 		int version,
+	int xactsize,	int poolsize)
+{
+int				i;
+RpcUdpXactPool	rval = malloc(sizeof(*rval));
+
+	assert( rval &&
+			RTEMS_SUCCESSFUL == rtems_message_queue_create(
+									rtems_build_name('R','P','C','p'),
+									poolsize,
+									sizeof(RpcUdpXact),
+									RTEMS_DEFAULT_ATTRIBUTES,
+									&rval->box) );
+	rval->xactSize = xactsize;
+	return rval;
+}
+
+void
+rpcUdpXactPoolDelete(RpcUdpXactPool pool)
+{
+RpcUdpXact xact;
+
+	while ((xact = rpcUdpXactPoolGet(pool, XactGetFail))) {
+		rpcUdpXactDestroy(xact);
+	}
+	rtems_message_queue_delete(pool->box);
+	free(pool);
+}
+
+RpcUdpXact
+rpcUdpXactPoolGet(RpcUdpXactPool pool, XactPoolGetMode mode)
+{
+RpcUdpXact		 xact;
+rtems_unsigned32 size;
+
+	if (RTEMS_SUCCESSFUL != rtems_message_queue_receive(
+								pool->box,
+								&xact,
+								&size,
+								XactGetWait == mode ?
+									RTEMS_WAIT : RTEMS_NO_WAIT,
+								RTEMS_NO_TIMEOUT)) {
+		if (XactGetCreate == mode) {
+			xact = rpcUdpXactCreate(
+							pool->prog,
+							pool->version,
+							pool->xactSize);
+			if (xact)
+				xact->pool = pool;
+		}
+	}
+	return xact;
+}
+
+void
+rpcUdpXactPoolPut(RpcUdpXact xact)
+{
+RpcUdpXactPool pool;
+	assert( pool=xact->pool );
+	if (RTEMS_SUCCESSFUL != rtems_message_queue_send(
+								pool,
+								&xact,
+								sizeof(xact)))
+		rpcUdpXactDestroy(xact);
 }
 
 

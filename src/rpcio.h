@@ -15,6 +15,7 @@ typedef struct RpcUdpXactRec_	*RpcUdpXact;
 
 typedef RpcUdpXact				RpcUdpClnt;
 
+
 int
 rpcUdpInit(void);
 
@@ -23,6 +24,7 @@ rpcServerCreate(
 	struct sockaddr_in *paddr,
 	struct timeval		retry_period
 	);
+
 
 void
 rpcServerDestroy(RpcServer s);
@@ -80,5 +82,34 @@ rpcUdpSend(
 
 enum clnt_stat
 rpcUdpRcv(RpcUdpXact xact);
+
+#ifdef __rtems /* pools are implemented by RTEMS message queues */
+/* manage pools of transactions */
+
+typedef struct RpcUdpXactPoolRec_  *RpcUdpXactPool;
+
+/* NOTE: the pool is empty initially, must get messages (in
+ *       GetCreate mode
+ */
+RpcUdpXactPool
+rpcUdpXactPoolCreate(
+	int prog, 		int version,
+	int xactsize,	int poolsize);
+
+void
+rpcUdpXactPoolDelete(RpcUdpXactPool pool);
+
+typedef enum {
+	XactGetFail,	/* call fails if no transaction available */
+	XactGetWait,	/* call blocks until transaction available */
+	XactGetCreate	/* a new transaction is allocated (and freed when put back to the pool */
+} XactPoolGetMode;
+
+RpcUdpXact
+rpcUdpXactPoolGet(RpcUdpXactPool pool, XactPoolGetMode mode);
+
+void
+rpcUdpXactPoolPut(RpcUdpXact xact);
+#endif
 
 #endif
