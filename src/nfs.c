@@ -264,8 +264,9 @@ nfscookie		*pcookie;
 	/* we must pass the address of a char* */
 	name = (len > NFS_MAXNAMLEN) ? pde->d_name : dummy.nambuf;
 
-	if ( !xdr_filename(xdrs, &name) )
+	if ( !xdr_filename(xdrs, &name) ) {
 		return FALSE;
+	}
 
 	if (len >= 0) {
 		nlen      = strlen(name);
@@ -278,8 +279,9 @@ nfscookie		*pcookie;
 	 * - the caller ends up with an invalid readdirargs cookie otherwise...
 	 */
 	pcookie = (len >= 0) ? &di->readdirargs.cookie : &dummy.cookie;
-	if ( !xdr_nfscookie(xdrs, pcookie) )
+	if ( !xdr_nfscookie(xdrs, pcookie) ) {
 		return FALSE;
+	}
 
 	di->len = len;
 	/* adjust the buffer pointer */
@@ -327,6 +329,13 @@ DirInfo	dip;
 
 	if ( ! xdr_bool(xdrs, &di->eofreached) )
 		return FALSE;
+
+	/* if everything fits into the XDR buffer but not the user's buffer,
+	 * they must resume reading from where xdr_dir_info_entry() started
+	 * skipping and 'eofreached' needs to be adjusted
+	 */
+	if ( di->len < 0 && di->eofreached )
+		di->eofreached = FALSE;
 
 	return TRUE;
 }
