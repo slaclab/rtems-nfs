@@ -3021,15 +3021,17 @@ static rtems_driver_address_table	drvNfs = {
  *       not in 'dot' notation.
  */
 int
-nfsMount(char *host, char *path, char *mntpoint)
+nfsMount(char *uidhost, char *path, char *mntpoint)
 {
 rtems_filesystem_mount_table_entry_t	*mtab;
 struct stat								st;
 int										devl;
+char									*host, *dst;
 int										rval = -1;
 char									*dev =  0;
-	if (!host || !path || !mntpoint) {
-		fprintf(stderr,"usage: nfsMount(""host"",""path"",""mountpoint"")\n");
+
+	if (!uidhost || !path || !mntpoint) {
+		fprintf(stderr,"usage: nfsMount(""[uid.gid@]host"",""path"",""mountpoint"")\n");
 		return -1;
 	}
 
@@ -3049,24 +3051,41 @@ char									*dev =  0;
 		}
 	}
 
+	if ( !(host=strchr(uidhost,UIDSEP)) ) {
+		host = uidhost;
+	} else {
+		host++;
+	}
+
 	if (isdigit(*host)) {
 		/* avoid using gethostbyname */
-		sprintf(dev,"%s:%s",host,path);
+		sprintf(dev,"%s:%s",uidhost,path);
 	} else {
+		struct hostent *h;
+
+		/* copy the uid part (hostname will be
+		 * overwritten)
+		 */
+		strcpy(dev, uidhost);
+
 		/* NOTE NOTE NOTE: gethostbyname is NOT
 		 * thread safe. This is UGLY
 		 */
+
 /* BEGIN OF NON-THREAD SAFE REGION */
-		struct hostent *h = gethostbyname(host);
+
+		h = gethostbyname(host);
+
 		if ( !h ||
 			 !inet_ntop( AF_INET,
 					     (struct in_addr*)h->h_addr_list[0],
-						 dev,
-						 devl )
+						 dev  + (host - uidhost),
+						 devl - (host - uidhost) )
 			) {
 			fprintf(stderr,"nfsMount: host '%s' not found\n",host);
 			goto cleanup;
 		}
+
 /* END OF NON-THREAD SAFE REGION */
 
 		/* append ':<path>' */

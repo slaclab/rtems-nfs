@@ -33,7 +33,7 @@
 /* CONFIGURABLE PARAMETERS                                      */
 /****************************************************************/
 
-#define  MBUF_RX		/* If defined: use mbuf XDR stream for
+#define MBUF_RX			/*If defined: use mbuf XDR stream for
 						 * decoding directly out of mbufs
 						 * Otherwise, the regular sendto/recvfrom
 						 * interface will be used involving an
@@ -59,7 +59,7 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 /* how many times should we try to resend a failed
  * transaction with refreshed AUTHs
  */
-#define RPCIOD_RESEND		2
+#define RPCIOD_REFRESH		2
 
 #ifdef __rtems
 /* Events we are using; the RPC_EVENT
@@ -86,7 +86,9 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define DEBUG_MALLOC		(1<<2)
 #define DEBUG_TIMEOUT		(1<<3)
 
-#define DEBUG	(DEBUG_MALLOC | DEBUG_TRACE_XACT | DEBUG_TIMEOUT | DEBUG_EVENTS)
+#define DEBUG				(DEBUG_TIMEOUT)
+#undef  DEBUG
+
 
 /****************************************************************/
 /* END OF CONFIGURABLE SECTION                                  */
@@ -115,19 +117,39 @@ static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
 #define XACT_HASH_MSK	((XACT_HASHS)-1)	/* mask to extract the hash index from a RPC-XID */
 
 
-#define HASH_TBL_LOCK()		do { 							\
+#define MU_LOCK(mutex)		do { 							\
 								rtems_semaphore_obtain(		\
-										hlock, 				\
+										(mutex),			\
 										RTEMS_WAIT,			\
 										RTEMS_NO_TIMEOUT	\
 										);					\
 							} while(0)
 
-#define HASH_TBL_UNLOCK()	do {							\
+#define MU_UNLOCK(mutex)	do {							\
 								rtems_semaphore_release(	\
-										hlock				\
+										(mutex)				\
 										);					\
 							} while(0)
+
+#define MU_CREAT(pmutex)	do {							\
+							assert(							\
+								RTEMS_SUCCESSFUL ==			\
+								rtems_semaphore_create(		\
+										rtems_build_name(	\
+											'R','P','C','l'	\
+											),				\
+										1,					\
+										MUTEX_ATTRIBUTES,	\
+										0,					\
+										(pmutex)) );		\
+							} while (0)
+
+
+#define MU_DESTROY(mutex)	do {							\
+								rtems_semaphore_delete(		\
+										mutex				\
+										);					\
+							} while (0)
 
 #define MUTEX_ATTRIBUTES	(RTEMS_LOCAL           | 		\
 			   				RTEMS_PRIORITY         | 		\
@@ -167,6 +189,19 @@ typedef struct ListNodeRec_ {
 typedef struct RpcUdpServerRec_ {
 		struct sockaddr_in	addr;
 		AUTH				*auth;
+		rtems_id			authlock;		/* must MUTEX the auth object - it's not clear
+											 *  what is better:
+											 *    1 having one (MUTEXed) auth per server
+											 *	   who is shared among all transactions
+											 *	   using that server
+											 *	 2 maintaining an AUTH per transaction
+											 *	   (there are then other options: manage
+											 *	   XACT pools on a per-server basis instead
+											 *	   of associating a server with a XACT when
+											 *   sending)
+											 * experience will show if the current (1)
+											 * approach has to be changed.
+											 */
 		TimeoutT			retry_period;	/* dynamically adjusted retry period
 											 * (based on packet roundtrip time)
 											 */
@@ -188,12 +223,12 @@ typedef union  RpcBufU_ {
  */
 #ifdef MBUF_RX
 typedef	struct mbuf *		RxBuf;	/* an MBUF chain */
-static  void   				bufFree(struct mbuf *m);
+static  void   				bufFree(struct mbuf **m);
 #define XID(ibuf) 			(*(mtod((ibuf), u_long *)))
 extern void 				xdrmbuf_create(XDR *, struct mbuf *, enum xdr_op);
 #else
 typedef RpcBuf				RxBuf;
-#define	bufFree(b)			do { FREE(b); } while(0)
+#define	bufFree(b)			do { FREE(*(b)); *(b)=0; } while(0)
 #define XID(ibuf) 			((ibuf)->xid)
 #endif
 
@@ -207,7 +242,6 @@ typedef struct RpcUdpXactRec_ {
 		RpcUdpServer		server;		/* server this XACT goes to                     */
 		long				lifetime;	/* during the lifetime, retry attempts are made */
 		long				tolive;		/* lifetime timer                               */
-		long				resend;		/* resend attempts								*/
 		struct rpc_err		status;		/* RPC reply error status                       */
 #ifdef __rtems
 		long				age;		/* age info; needed to manage retransmission    */
@@ -248,7 +282,7 @@ static RpcUdpXact xactHashTbl[XACT_HASHS]={0};
 
 /* forward declarations */
 static RpcUdpXact
-sockRcv(RxBuf *pibuf, int ibufsize);
+sockRcv(void);
 
 static void
 rpcio_daemon(rtems_task_argument);
@@ -276,9 +310,9 @@ static inline void *MALLOC(int s)
 {
 	if (s) {
 		void *rval;
-		HASH_TBL_LOCK();
+		MU_LOCK(hlock);
 		assert(nibufs++ < 2000);
-		HASH_TBL_UNLOCK();
+		MU_UNLOCK(hlock);
 		assert(rval = malloc(s));
 		return rval;
 	}
@@ -288,9 +322,9 @@ static inline void *MALLOC(int s)
 static inline void FREE(void *p)
 {
 	if (p) {
-		HASH_TBL_LOCK();
+		MU_LOCK(hlock);
 		nibufs--;
-		HASH_TBL_UNLOCK();
+		MU_UNLOCK(hlock);
 		free(p);
 	}
 }
@@ -298,6 +332,37 @@ static inline void FREE(void *p)
 #define MALLOC	malloc
 #define FREE	free
 #endif
+
+static inline bool_t
+locked_marshal(RpcUdpServer s, XDR *xdrs)
+{
+bool_t rval;
+	MU_LOCK(s->authlock);
+	rval = AUTH_MARSHALL(s->auth, xdrs);
+	MU_UNLOCK(s->authlock);
+	return rval;
+}
+
+/* Locked operations on a server's auth object */
+static inline bool_t
+locked_validate(RpcUdpServer s, struct opaque_auth *v)
+{
+bool_t rval;
+	MU_LOCK(s->authlock);
+	rval = AUTH_VALIDATE(s->auth, v);
+	MU_UNLOCK(s->authlock);
+	return rval;
+}
+
+static inline bool_t
+locked_refresh(RpcUdpServer s)
+{
+bool_t rval;
+	MU_LOCK(s->authlock);
+	rval = AUTH_REFRESH(s->auth);
+	MU_UNLOCK(s->authlock);
+	return rval;
+}
 
 /* Create a server object
  *
@@ -402,9 +467,9 @@ struct pmap		pmaparg;
 	 */
 	rval->retry_period  = RPCIOD_RETX_CAP_S * ticksPerSec; 
 
-	/* TODO handle credential lifetime? */
-
 	rval->auth 			= auth;
+
+	MU_CREAT( &rval->authlock );
 
 	*psrv				= rval;
 	return RPC_SUCCESS;
@@ -418,7 +483,9 @@ rpcUdpServerDestroy(RpcUdpServer s)
 	/* we should probably verify (but how?) that nobody
 	 * (at least: no outstanding XACTs) is using this
 	 */
+	MU_LOCK(s->authlock);
 	auth_destroy(s->auth);
+	MU_DESTROY(s->authlock);
 	FREE(s);
 }
 
@@ -455,7 +522,7 @@ register int	i,j;
 		}
 		/* pick a free table slot and initialize the XID */
 		rval->obuf.xid = time(0) ^ (unsigned long)rval;
-		HASH_TBL_LOCK();
+		MU_LOCK(hlock);
 		i=j=(rval->obuf.xid & XACT_HASH_MSK);
 #ifdef __rtems
 		if (msgQ) {
@@ -478,7 +545,7 @@ register int	i,j;
 #ifdef __rtems
 		}
 #endif
-		HASH_TBL_UNLOCK();
+		MU_UNLOCK(hlock);
 		if (i==j) {
 			XDR_DESTROY(&rval->xdrs);
 			FREE(rval);
@@ -502,11 +569,11 @@ int i = xact->obuf.xid & XACT_HASH_MSK;
 
 		assert(xactHashTbl[i]==xact);
 
-		HASH_TBL_LOCK();
+		MU_LOCK(hlock);
 		xactHashTbl[i]=0;
-		HASH_TBL_UNLOCK();
+		MU_UNLOCK(hlock);
 
-		bufFree(xact->ibuf);
+		bufFree(&xact->ibuf);
 
 		XDR_DESTROY(&xact->xdrs);
 		FREE(xact);
@@ -558,7 +625,6 @@ va_list			ap;
 #endif
 
 	xact->tolive    = xact->lifetime;
-	xact->resend	= RPCIOD_RESEND;
 
 	xact->xres      = xres;
 	xact->pres      = pres;
@@ -569,7 +635,7 @@ va_list			ap;
 	/* increment transaction ID */
 	xact->obuf.xid += XACT_HASHS;
 	XDR_SETPOS(xdrs, xact->xdrpos);
-	if ( !XDR_PUTLONG(xdrs,&proc) || !AUTH_MARSHALL(srvr->auth, xdrs) ||
+	if ( !XDR_PUTLONG(xdrs,&proc) || !locked_marshal(srvr, xdrs) ||
 		 !xargs(xdrs, pargs) ) {
 		va_end(ap);
 		return(xact->status.re_status=RPC_CANTENCODEARGS);
@@ -582,14 +648,11 @@ va_list			ap;
 	va_end(ap);
 #ifdef __rtems
 	rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
-	if (rtems_message_queue_send(
-								msgQ,
-								&xact,
-								sizeof(xact))) {
+	if ( rtems_message_queue_send( msgQ, &xact, sizeof(xact)) ) {
 		return RPC_CANTSEND;
 	}
 	/* wakeup the rpciod */
-	assert(RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT));
+	assert( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
 #endif
 
 	return RPC_SUCCESS;
@@ -604,11 +667,16 @@ enum clnt_stat
 rpcUdpRcv(RpcUdpXact xact)
 {
 int					i;
+int					refresh;
 XDR					reply_xdrs;
 struct rpc_msg		reply_msg;
 #ifdef __rtems
 rtems_event_set		gotEvents;
 #endif
+
+	refresh = 0;
+
+	do {
 
 #ifdef __rtems
 	/* block for the reply */
@@ -621,6 +689,7 @@ rtems_event_set		gotEvents;
 
 	if (xact->status.re_status) {
 #ifdef MBUF_RX
+		/* add paranoia */
 		assert( !xact->ibuf );
 #endif
 		return xact->status.re_status;
@@ -641,7 +710,7 @@ rtems_event_set		gotEvents;
 		/* OK */
 		_seterr_reply(&reply_msg, &xact->status);
 		if (RPC_SUCCESS == xact->status.re_status) {
-			if ( !AUTH_VALIDATE(xact->server->auth,
+			if ( !locked_validate(xact->server,
 								&reply_msg.acpted_rply.ar_verf) ) {
 				xact->status.re_status = RPC_AUTHERROR;
 				xact->status.re_why    = AUTH_INVALIDRESP;
@@ -649,6 +718,13 @@ rtems_event_set		gotEvents;
 			if (reply_msg.acpted_rply.ar_verf.oa_base) {
 				reply_xdrs.x_op = XDR_FREE;
 				xdr_opaque_auth(&reply_xdrs, &reply_msg.acpted_rply.ar_verf);
+			}
+			refresh = 0;
+		} else {
+			/* should we try to refresh our credentials ? */
+			if ( !refresh ) {
+				/* had never tried before */
+				refresh = RPCIOD_REFRESH;
 			}
 		}
 	} else {
@@ -658,11 +734,25 @@ rtems_event_set		gotEvents;
 	}
 	XDR_DESTROY(&reply_xdrs);
 
-	bufFree(xact->ibuf);
-	xact->ibuf     = 0;
+	bufFree(&xact->ibuf);
+
 #ifndef MBUF_RX
 	xact->ibufsize = 0;
 #endif
+	
+#ifdef __rtems
+	if (refresh && locked_refresh(xact->server)) {
+		rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
+		if ( rtems_message_queue_send(msgQ, &xact, sizeof(xact)) ) {
+			return RPC_CANTSEND;
+		}
+		/* wakeup the rpciod */
+		fprintf(stderr,"INFO: refreshing my AUTH\n");
+		assert( RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT) );
+	}
+#endif
+
+	} while ( 0 &&  refresh-- > 0 );
 
 	return xact->status.re_status;
 }
@@ -714,12 +804,8 @@ struct sockwakeup	wkup;
 			assert( RTEMS_SUCCESSFUL == rtems_clock_get(
 											RTEMS_CLOCK_GET_TICKS_PER_SECOND,
 											&ticksPerSec));
-			assert( RTEMS_SUCCESSFUL == rtems_semaphore_create(
-											rtems_build_name('R','P','C','l'),
-											1,
-											MUTEX_ATTRIBUTES,
-											0,
-											&hlock) );
+			MU_CREAT( &hlock );
+
 			assert( RTEMS_SUCCESSFUL == rtems_task_create(
 											rtems_build_name('R','P','C','d'),
 											RPCIOD_PRIO,
@@ -813,7 +899,6 @@ enum clnt_stat	stat;
 fd_set			rset;
 struct timeval	tmp;
 int				sel_err;
-RxBuf			buf = 0;
 #endif
 		if (stat = rpcUdpSend(xact, xact->server, timeout, proc,
 					xres, pres,
@@ -835,16 +920,11 @@ RxBuf			buf = 0;
 			sel_err=select(ourSock+1, &rset, 0, 0, &tmp);
 			if (sel_err > 0) {
 				/* OK */
-				if (!buf) {
-					buf = (RxBuf)MALLOC(UDPMSGSIZE);
-				}
-				if ( sockRcv(&buf, UDPMSGSIZE) )
+				if ( sockRcv() )
 					return rpcUdpRcv(xact);
 				fprintf(stderr,"Rcv failed '%s'\n",strerror(errno));
 			}
 		} while (xact->tolive--);
-
-		bufFree(buf);
 
 		return RPC_TIMEDOUT;
 #else
@@ -930,14 +1010,15 @@ RpcUdpXact        xact;
 RpcUdpServer      srv;
 char              strbuf[20];
 char              *chpt;
-rtems_interval    next_retrans, then, now;
+rtems_interval    next_retrans, then, unow;
+long			  now;	/* need to do signed comparison with age! */
 rtems_event_set   events;
 rtems_id          q;
 ListNode          newList;
 rtems_unsigned32  size;
-RxBuf             buf      =  0;
-ListNodeRec       listHead = {0};
-unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
+ListNodeRec       listHead   = {0};
+unsigned long     epoch      = RPCIOD_EPOCH_SECS * ticksPerSec;
+unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 	assert( RTEMS_SUCCESSFUL == rtems_clock_get(
 									RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
@@ -962,7 +1043,7 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 			fprintf(stderr,"RPCIO: got KILL event\n");
 #endif
 
-			HASH_TBL_LOCK();
+			MU_LOCK(hlock);
 			for (i=XACT_HASHS-1; i>=0; i--) {
 				if (xactHashTbl[i]) {
 					break;
@@ -974,7 +1055,7 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 				/* messages queued after we executed this assignment will fail */
 				msgQ=0;
 			}
-			HASH_TBL_UNLOCK();
+			MU_UNLOCK(hlock);
 			if (i>=0) {
 				fprintf(stderr,"There are still transactions circulating; I refuse to go away\n");
 				fprintf(stderr,"(1st in slot %i)\n",i);
@@ -986,12 +1067,12 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 
 		rtems_clock_get(
 				RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
-				&now);
+				&unow);
 
 		/* measure everything relative to then to protect against
 		 * rollover
 		 */
-		now-=then;
+		now = unow - then;
 
 		/* NOTE: we don't lock the hash table while we are operating
 		 * on transactions; the paradigm is that we 'own' a particular
@@ -1006,53 +1087,47 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 			fprintf(stderr,"RPCIO: got RX event\n");
 #endif
 
-#ifndef MBUF_RX
-			if (!buf) {
-				buf=(RxBuf)MALLOC(UDPMSGSIZE);
-			}
-#endif
-			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
+			while ((xact=sockRcv())) {
 
 				/* extract from the retransmission list */
 				nodeXtract(&xact->node);
 
+				/* change the ID - there might already be
+				 * a retransmission on the way. When it's
+				 * reply arrives we must not find it's ID
+				 * in the hashtable
+				 */
+				xact->obuf.xid        += XACT_HASHS;
+
 				xact->status.re_status = RPC_SUCCESS;
 
 				/* calculate roundtrip ticks */
-				xact->trip = now - xact->trip;
+				xact->trip             = now - xact->trip;
 
-				srv = xact->server;
+				srv                    = xact->server;
 
 				/* adjust the server's retry period */
 				{
 					register TimeoutT rtry = srv->retry_period;
+					register TimeoutT trip = xact->trip;
+
+					assert( trip >= 0 );
+
+					if ( 0==trip )
+						trip = 1;
 
 					/* retry_new = 0.75*retry_old + 0.25 * 4 * roundrip */
-					rtry = 3*rtry + (xact->trip << 2);
-					rtry >>= 2;
-					if (0==rtry)
-						rtry = 1;
+					rtry   = (3*rtry + (trip << 2)) >> 2;
+
+					if ( rtry > max_period )
+						rtry = max_period;
+
 					srv->retry_period = rtry;
-
-					assert( (unsigned long)rtry < 5*epoch );
-
-					if ( rtry > ticksPerSec * RPCIOD_RETX_CAP_S )
-						rtry = ticksPerSec * RPCIOD_RETX_CAP_S;
 				}
 
 				/* wakeup requestor */
 				rtems_event_send(xact->requestor, RTEMS_RPC_EVENT);
-#ifndef MBUF_RX
-				if (!buf)
-					buf = (RpcBuf)MALLOC(UDPMSGSIZE);
-#else
-				assert( !buf );
-#endif
 			}
-#ifdef  MBUF_RX
-			bufFree(buf);
-			buf = 0;
-#endif
 		}
 
 		if (RPCIOD_TX_EVENT & events) {
@@ -1133,7 +1208,7 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 							/* this is a real retry; we backup
 							 * the server's retry interval
 							 */
-							if ( srv->retry_period < RPCIOD_RETX_CAP_S * ticksPerSec ) {
+							if ( srv->retry_period < max_period ) {
 
 								/* If multiple transactions for this server
 								 * fail (e.g. because it died) this will
@@ -1196,20 +1271,25 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 			register ListNode n;
 			then += now;
 			for (n=listHead.next; n; n=n->next) {
-				/* age = oldnow + age - newnow */
-				((RpcUdpXact)n)->age  += now;
+				/* readjust outstanding time intervals subject to the
+				 * condition that the 'absolute' time must remain
+				 * the same. 'age' and 'trip' are measured with
+				 * respect to 'then' - hence:
+				 *
+				 * abs_age == old_age + old_then == new_age + new_then
+				 * 
+				 * ==> new_age = old_age + old_then - new_then == old_age - 'now'
+				 */
+				((RpcUdpXact)n)->age  -= now;
+				((RpcUdpXact)n)->trip -= now;
 #if DEBUG & DEBUG_TIMEOUT
 				fprintf(stderr,
-						"readjusted XACT (0x%08x); age is 0x%x, now: 0x%x\n",
+						"readjusted XACT (0x%08x); age is 0x%x, trip: 0x%x now: 0x%x\n",
 						(RpcUdpXact)n,
+						((RpcUdpXact)n)->trip,
 						((RpcUdpXact)n)->age,
 						now);
 #endif
-				/* roundtrip = arrive - sent = arrive + newthen - (sent + oldthen)
-				 *                           = arrive + newthen - (sent + newthen - oldthen)
-				 *  ==> sent = (sent - oldthen) + newthen = sent + now;
-				 */
-				((RpcUdpXact)n)->trip -= now;
 			}
 			now = 0;
 		}
@@ -1245,11 +1325,9 @@ unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 	}
 #endif
 
-	bufFree(buf);
-
 	rtems_message_queue_delete(q);
 
-	rtems_semaphore_delete(hlock);
+	MU_DESTROY(hlock);
 
 	fprintf(stderr,"RPC daemon exited...\n");
 
@@ -1380,12 +1458,13 @@ ssize_t
 recv_mbuf_from(int s, struct mbuf **ppm, long len, struct sockaddr *fromaddr, int *fromlen);
 
 static void
-bufFree(struct mbuf *m)
+bufFree(struct mbuf **m)
 {
-	if (m) {
+	if (*m) {
 		rtems_bsdnet_semaphore_obtain();
-		m_freem(m);
+		m_freem(*m);
 		rtems_bsdnet_semaphore_release();
+		*m = 0;
 	}
 }
 #endif
@@ -1394,26 +1473,57 @@ bufFree(struct mbuf *m)
  * the transaction corresponding to the
  * transaction ID received in the server
  * reply.
+ *
+ * The semantics of the 'pibuf' pointer are
+ * as follows:
+ *
+ * MBUF_RX: 
+ *
  */
+
+#define RPCIOD_RXBUFSZ	UDPMSGSIZE
+
 static RpcUdpXact
-sockRcv(RxBuf *pibuf, int ibufsize)
+sockRcv(void)
 {
 int					len,i;
 u_long				xid;
-RpcUdpXact			xact = 0;
 struct sockaddr_in	fromAddr;
 int					fromLen  = sizeof(fromAddr);
+RxBuf				ibuf     = 0;
+RpcUdpXact			xact     = 0;
 
+	do {
+
+	/* rcv_mbuf() and recvfrom() differ in that the
+	 * former allocates buffers and passes them back
+	 * to us whereas the latter requires us to provide
+	 * buffer space.
+	 * Hence, in the first case whe have to make sure
+	 * no old buffer is leaked - in the second case,
+	 * we might well re-use an old buffer but must
+	 * make sure we have one allocated
+	 */
 #ifdef MBUF_RX
-	len  = recv_mbuf_from(ourSock,
-					pibuf,
-					UDPMSGSIZE,
-				   (struct sockaddr*)&fromAddr, &fromLen);
+	if (ibuf)
+		bufFree(&ibuf);
+
+	len  = recv_mbuf_from(
+					ourSock,
+					&ibuf,
+					RPCIOD_RXBUFSZ,
+				    (struct sockaddr*)&fromAddr,
+				    &fromLen);
 #else
+	if ( !(ibuf) )
+		assert( ibuf = (RpcBuf)MALLOC(RPCIOD_RXBUFSZ) );
+
 	len  = recvfrom(ourSock,
-				   (*pibuf)->buf, ibufsize,
-				   0,
-				   (struct sockaddr*)&fromAddr, &fromLen);
+				    ibuf->buf,
+				    RPCIOD_RXBUFSZ,
+				    0,
+				    (struct sockaddr*)&fromAddr,
+					&fromLen);
 #endif
 
 	if (len <= 0) {
@@ -1422,12 +1532,13 @@ int					fromLen  = sizeof(fromAddr);
 		goto cleanup;
 	}
 
-	i = (xid=XID(*pibuf)) & XACT_HASH_MSK;
+	i = (xid=XID(ibuf)) & XACT_HASH_MSK;
 
 	if ( !(xact=xactHashTbl[i])   ||
 		   xact->obuf.xid                     != xid						|| 
 		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
 		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
+
 		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
 		if (xact) {
 			fprintf(stderr,"xact: xid  0x%08x  -- got 0x%08x\n",
@@ -1441,17 +1552,24 @@ int					fromLen  = sizeof(fromAddr);
 		} else {
 			fprintf(stderr,"got xid 0x%08x but its slot is empty\n",xid);
 		}
+		/* forget about this one and try again */
 		xact = 0;
-		goto cleanup;
 	}
-	xact->ibuf     = *pibuf;
+
+	} while ( !xact );
+
+	xact->ibuf     = ibuf;
 #ifndef MBUF_RX
-	xact->ibufsize = ibufsize;
+	xact->ibufsize = RPCIOD_RXBUFSZ;
 #endif
-	*pibuf         = 0;
+
+	return xact;
 
 cleanup:
-	return xact;
+
+	bufFree(&ibuf);
+
+	return 0;
 }
 
 
