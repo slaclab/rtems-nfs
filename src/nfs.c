@@ -938,9 +938,15 @@ entry	dummy;
 
 	/* it's crucial to zero out the 'next' pointer
 	 * because it terminates the xdr_entry recursion
+	 *
+	 * we also must make the filename some non-zero
+	 * char pointer!
 	 */
 
-	dummy.nextentry = 0;
+	memset(&dummy, 0, sizeof(dummy));
+
+	dummy.nextentry   = 0;
+	dummy.name        = "somename"; /* guess average length of a filename */
 	dirres_entry_size = xdr_sizeof(xdr_entry, &dummy);
 
 	assert( smallPool = rpcUdpXactPoolCreate(
