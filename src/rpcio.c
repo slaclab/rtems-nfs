@@ -17,41 +17,80 @@
 
 #ifdef __rtems
 #define RTEMS_NFS_EVENT		RTEMS_EVENT_30
-#endif
+#define RPCIOD_RX_EVENT		RTEMS_EVENT_1
+#define RPCIOD_TX_EVENT		RTEMS_EVENT_2
+#define RPCIOD_KILL_EVENT	RTEMS_EVENT_3
+#define RPCIOD_STACK		10000
+#define RPCIOD_PRIO			50
+#define RPCIOD_QDEPTH		20
+#define HASH_TBL_LOCK()		do {rtems_semaphore_obtain(hlock, RTEMS_WAIT, RTEMS_NO_TIMEOUT);} while(0)
+#define HASH_TBL_UNLOCK()	do {rtems_semaphore_release(hlock);} while(0)
 
+#define MUTEX_ATTRIBUTES	(RTEMS_LOCAL           | \
+			   				RTEMS_PRIORITY         | \
+			   				RTEMS_INHERIT_PRIORITY | \
+						   	RTEMS_BINARY_SEMAPHORE)
+
+#else
 
 #define HASH_TBL_LOCK()		do {} while(0)
 #define HASH_TBL_UNLOCK()	do {} while(0)
+
+#endif
+
+#ifdef __rtems
+typedef	rtems_interval		TimeoutT;
+#else
+typedef struct timeval		TimeoutT;
+#endif
+
+typedef struct ListNodeRec_ {
+	struct ListNodeRec_ *next, *prev;
+} ListNodeRec, *ListNode;
 
 
 typedef struct RpcServerRec_ {
 		struct sockaddr_in	addr;
 		AUTH				*auth;
-		struct timeval		retry_period;
+		TimeoutT			retry_period;
 } RpcServerRec;
 
+typedef union  RpcBufU_ {
+		u_long				xid;
+		char				buf[1];
+} RpcBufU, *RpcBuf;
+
 typedef struct RpcUdpXactRec_ {
+		ListNodeRec			node;
 		RpcServer			server;
-		struct timeval		timeout;
+		long				retrans;
 		struct rpc_err		status;
 #ifdef __rtems
+		long				age;
 		rtems_id			requestor;
-		rtems_id			retrans_timer;
 #endif
 		XDR					xdrs;
 		int					xdrpos;
 		xdrproc_t			xres;
 		caddr_t				pres;
-		int					bufsize;	/* size of the obuf */
-		union {
-			u_long				xid;
-			char				buf[1];
-		}					obuf;
+		int					ibufsize;	/* size of the obuf */
+		int					obufsize;	/* size of the obuf */
+		RpcBuf				ibuf;
+		RpcBufU				obuf;
 } RpcUdpXactRec;
 
 static RpcUdpXact xactHashTbl[XACT_HASHS]={0};
 
-static int ourSock = -1;
+static int				ourSock = -1;
+#ifdef __rtems
+static rtems_id			rpciod  = 0;
+static rtems_id			msgQ    = 0;
+static rtems_id			hlock	= 0;
+static rtems_id			fini	= 0;
+static rtems_interval	ticksPerSec;
+
+static void rpcio_daemon(rtems_task_argument);
+#endif
 
 RpcServer
 rpcServerCreate(struct sockaddr_in *paddr, struct timeval retry_period)
@@ -63,7 +102,12 @@ u_short		port;
 	} 
 	rval       			= (RpcServer)malloc(sizeof(*rval));
 	rval->addr 			= *paddr;
+#ifdef __rtems
+	rval->retry_period  = retry_period.tv_usec * ticksPerSec / 1000000;
+	rval->retry_period += retry_period.tv_sec * ticksPerSec; 
+#else
 	rval->retry_period	= retry_period;
+#endif
 	rval->auth 			= authunix_create_default();
 	return rval;
 }
@@ -110,27 +154,38 @@ register int	i,j;
 		rval->obuf.xid = time(0) ^ (unsigned long)rval;
 		HASH_TBL_LOCK();
 		i=j=(rval->obuf.xid & XACT_HASH_MSK);
-		do {
-			i=(i+1) & XACT_HASH_MSK; /* cheap modulo */
-			if (!xactHashTbl[i]) {
-			printf("TSILL entering index %i, val %x\n",i,rval);
-				xactHashTbl[i]=rval;
-				j=-1;
-				break;
-			}
-		} while (i!=j);
+#ifdef __rtems
+		if (msgQ) {
+#endif
+			/* if there's no message queue, refuse to 
+			 * give them transactions; we might be in the process to
+			 * go away...
+			 */
+			do {
+				i=(i+1) & XACT_HASH_MSK; /* cheap modulo */
+				if (!xactHashTbl[i]) {
+fprintf(stderr,"TSILL entering index %i, val %x\n",i,rval);
+					xactHashTbl[i]=rval;
+					j=-1;
+					break;
+				}
+			} while (i!=j);
+#ifdef __rtems
+		}
+#endif
 		HASH_TBL_UNLOCK();
 		if (i==j) {
 			XDR_DESTROY(&rval->xdrs);
 			free(rval);
 			return 0;
 		}
-		rval->obuf.xid= (rval->obuf.xid << LD_XACT_HASH) | i;
-		rval->xdrpos  = XDR_GETPOS(&(rval->xdrs));
-		rval->bufsize = size;
-#ifdef __rtems
-		rval->retrans_timer = 0;
-#endif
+		rval->obuf.xid  = (rval->obuf.xid << LD_XACT_HASH) | i;
+		rval->xdrpos    = XDR_GETPOS(&(rval->xdrs));
+		rval->obufsize  = size;
+		rval->ibuf	    = 0;
+		rval->ibufsize  = 0;
+		rval->node.next = 0;
+		rval->node.prev = 0;
 	}
 	return rval;
 }
@@ -140,12 +195,14 @@ rpcUdpXactDestroy(RpcUdpXact xact)
 {
 int i = xact->obuf.xid & XACT_HASH_MSK;
 
-			printf("TSILL removing index %i, val %x\n",i,xact);
+fprintf(stderr,"TSILL removing index %i, val %x\n",i,xact);
 		assert(xactHashTbl[i]==xact);
 
 		HASH_TBL_LOCK();
 		xactHashTbl[i]=0;
 		HASH_TBL_UNLOCK();
+
+		free(xact->ibuf);
 
 		XDR_DESTROY(&xact->xdrs);
 		free(xact);
@@ -166,14 +223,19 @@ rpcUdpSend(
 {
 register XDR	*xdrs;
 int				len;
+unsigned long	ms;
 va_list			ap;
-#ifdef __rtems
-rtems_event_set	gotEvents;
-#endif
 
 	va_start(ap,pargs);
 
-	xact->timeout = timeout;
+	ms = 1000 * timeout.tv_sec + timeout.tv_usec/1000;
+
+#ifdef __rtems
+	xact->retrans = ms * ticksPerSec / 1000 / xact->server->retry_period;
+#else
+	xact->retrans = ms / (1000 * xact->server->retry_period.tv_sec +
+						  xact->server->retry_period.tv_usec/1000);
+#endif
 	xact->xres    = xres;
 	xact->pres    = pres;
 	xact->server  = srvr;
@@ -194,76 +256,43 @@ rtems_event_set	gotEvents;
 		return(xact->status.re_status=RPC_CANTENCODEARGS);
 	}
 	va_end(ap);
-	len = (int)XDR_GETPOS(xdrs);
 #ifdef __rtems
 	rtems_task_ident(RTEMS_SELF, RTEMS_WHO_AM_I, &xact->requestor);
 	if (rtems_message_queue_send(
-								rpcQ,
+								msgQ,
 								&xact,
 								sizeof(xact))) {
 		return RPC_CANTSEND;
 	}
+	/* wakeup the rpciod */
+	assert(RTEMS_SUCCESSFUL==rtems_event_send(rpciod, RPCIOD_TX_EVENT));
+#endif
+
+	return RPC_SUCCESS;
+}
+
+enum clnt_stat
+rpcUdpRcv(RpcUdpXact xact)
+{
+int					i;
+XDR					reply_xdrs;
+struct rpc_msg		reply_msg;
+#ifdef __rtems
+rtems_event_set		gotEvents;
+#endif
+
+#ifdef __rtems
 	/* block for the reply */
 	rtems_event_receive(
 			RTEMS_NFS_EVENT,
 			RTEMS_WAIT | RTEMS_EVENT_ANY,
 			RTEMS_NO_TIMEOUT,
 			&gotEvents);
-	return xact->status.re_status;
-#else
-
-	if ( sendto(ourSock,
-				xact->obuf.buf,
-				len,
-				0,
-				(struct sockaddr*) &srvr->addr,
-				sizeof(srvr->addr)) != len ) {
-		xact->status.re_errno = errno;
-		return(xact->status.re_status=RPC_CANTSEND);
-	}
-
-	return RPC_SUCCESS;
+	if (xact->status.re_status)
+		return xact->status.re_status;
 #endif
-}
 
-enum clnt_stat
-rpcUdpRcv(RpcUdpXact *pxact)
-{
-int					len,i;
-union			{
-	u_long	xid;
-	char	buf[UDPMSGSIZE];
-}					ibuf;
-XDR					reply_xdrs;
-struct rpc_msg		reply_msg;
-RpcUdpXact			xact;
-struct sockaddr_in	fromAddr;
-int					fromLen = sizeof(fromAddr);
-
-	if (pxact)
-		*pxact=0;
-
-	len = recvfrom(ourSock,
-				   ibuf.buf, sizeof(ibuf.buf),
-				   0,
-				   (struct sockaddr*)&fromAddr, &fromLen);
-	if (len <= 0) {
-		fprintf(stderr,"RECV failed: %s\n",strerror(errno));
-		return RPC_CANTRECV;
-	}
-
-	i = ibuf.xid & XACT_HASH_MSK;
-
-	if ( !(xact=xactHashTbl[i])       					||
-		   xact->obuf.xid != ibuf.xid					|| 
-		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
-		   xact->server->addr.sin_port != fromAddr.sin_port ) {
-		fprintf(stderr,"WARNING rpcUdpRcv(): transaction mismatch\n");
-		return RPC_CANTRECV;
-	}
-
-
-	xdrmem_create(&reply_xdrs, ibuf.buf, sizeof(ibuf.buf), XDR_DECODE);
+	xdrmem_create(&reply_xdrs, xact->ibuf->buf, xact->ibufsize, XDR_DECODE);
 
 	reply_msg.acpted_rply.ar_verf          = _null_auth;
 	reply_msg.acpted_rply.ar_results.where = xact->pres;
@@ -291,31 +320,120 @@ int					fromLen = sizeof(fromAddr);
 	xact->status.re_status = RPC_CANTDECODERES;
 	XDR_DESTROY(&reply_xdrs);
 
-	if (pxact)
-		*pxact=xact;
+	free(xact->ibuf);
+	xact->ibuf     = 0;
+	xact->ibufsize = 0;
 
 	return xact->status.re_status;
 }
 
+static enum clnt_stat
+sockSnd(RpcUdpXact xact)
+{
+int len = (int)XDR_GETPOS(&xact->xdrs);
+	if ( sendto(ourSock,
+				xact->obuf.buf,
+				len,
+				0,
+				(struct sockaddr*) &xact->server->addr,
+				sizeof(xact->server->addr)) != len ) {
+		xact->status.re_errno = errno;
+		return(xact->status.re_status=RPC_CANTSEND);
+	}
+	return RPC_SUCCESS;
+}
+
+static RpcUdpXact
+sockRcv(RpcBuf *pibuf, int ibufsize)
+{
+int					len,i;
+RpcUdpXact			xact = 0;
+RpcBuf				ibuf     = *pibuf;
+struct sockaddr_in	fromAddr;
+int					fromLen  = sizeof(fromAddr);
+
+	len = recvfrom(ourSock,
+				   ibuf->buf, ibufsize,
+				   0,
+				   (struct sockaddr*)&fromAddr, &fromLen);
+	if (len <= 0) {
+		fprintf(stderr,"RECV failed: %s\n",strerror(errno));
+		goto cleanup;
+	}
+
+	i = ibuf->xid & XACT_HASH_MSK;
+
+	if ( !(xact=xactHashTbl[i])   ||
+		   xact->obuf.xid                     != ibuf->xid					|| 
+		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
+		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
+		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
+		xact = 0;
+		goto cleanup;
+	}
+	xact->ibufsize = ibufsize;
+	xact->ibuf     = ibuf;
+	*pibuf         = 0;
+
+cleanup:
+
+	return xact;
+}
+
+
+#ifdef __rtems
+static void
+rxWakeupCB(struct socket *sock, caddr_t arg)
+{
+rtems_event_send((rtems_id)arg, RPCIOD_RX_EVENT);
+}
+#endif
+
 int
 rpcUdpInit(void)
 {
-int				noblock = 1;
+int					noblock = 1;
 #ifdef __rtems
-struct timeval	rxpoll;
+struct sockwakeup	wkup;
 #endif
 
 	if (ourSock < 0) {
 		ourSock=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 		if (ourSock>=0) {
 			bindresvport(ourSock,(struct sockaddr_in*)0);
-#ifdef __linux
-			ioctl(ourSock, FIONBIO, (char*)&noblock);
-#endif
+			assert( 0==ioctl(ourSock, FIONBIO, (char*)&noblock) );
 #ifdef __rtems
-			rxpoll.tv_sec  = 3;
-			rxpoll.tv_usec = 0;
-			setsockopt(ourSock, SOL_SOCKET, SO_RCVTIMEO, &rxpoll);
+			/* assume nobody tampers with the clock !! */
+			assert( RTEMS_SUCCESSFUL == rtems_clock_get(
+											RTEMS_CLOCK_GET_TICKS_PER_SECOND,
+											&ticksPerSec));
+			assert( RTEMS_SUCCESSFUL == rtems_semaphore_create(
+											rtems_build_name('R','P','C','l'),
+											1,
+											MUTEX_ATTRIBUTES,
+											0,
+											&hlock) );
+			assert( RTEMS_SUCCESSFUL == rtems_task_create(
+											rtems_build_name('R','P','C','d'),
+											RPCIOD_PRIO,
+											RPCIOD_STACK,
+											RTEMS_DEFAULT_MODES,
+											RTEMS_DEFAULT_ATTRIBUTES,
+											&rpciod) );
+			wkup.sw_pfn = rxWakeupCB;
+			wkup.sw_arg = (caddr_t)rpciod;
+			assert( 0==setsockopt(ourSock, SOL_SOCKET, SO_RCVWAKEUP, &wkup, sizeof(wkup)) );
+			assert( RTEMS_SUCCESSFUL == rtems_message_queue_create(
+											rtems_build_name('R','P','C','q'),
+											RPCIOD_QDEPTH,
+											sizeof(RpcUdpXact),
+											RTEMS_DEFAULT_ATTRIBUTES,
+											&msgQ) );
+			assert( RTEMS_SUCCESSFUL == rtems_task_start(
+											rpciod,
+											rpcio_daemon,
+											0 ) );
+
 #endif
 		} else {
 			return -1;
@@ -334,6 +452,7 @@ rpcUdpClntCreate(
 RpcUdpXact	xact;
 	if (!(xact=rpcUdpXactCreate(prog, vers, UDPMSGSIZE)))
 		return 0;
+	/* TODO: could maintain a server cache */
 	xact->server = rpcServerCreate(psaddr, retry_timeout);
 	return xact;
 }
@@ -357,16 +476,12 @@ rpcUdpClntCall(
 	)
 {
 enum clnt_stat	stat;
-int				retry;
+#ifndef __rtems
 fd_set			rset;
-struct timeval	tmp = xact->server->retry_period;
+struct timeval	tmp;
 int				sel_err;
-
-	retry = timeout.tv_sec / tmp.tv_sec;
-
-	if (0==retry)
-		retry = 1;
-	while (retry--) {
+RpcBuf			buf = 0;
+#endif
 		if (stat = rpcUdpSend(xact, xact->server, timeout, proc,
 					xres, pres,
 					xargs, pargs,
@@ -374,107 +489,271 @@ int				sel_err;
 			fprintf(stderr,"Send failed: %i\n",stat);
 			return stat;
 		}
-		FD_ZERO(&rset);
-		FD_SET(ourSock, &rset);
-		/* linux tampers with this */
-		tmp = xact->server->retry_period;
-		sel_err=select(ourSock+1, &rset, 0, 0, &tmp);
-		if (sel_err > 0) {
-			/* OK */
-			if ( RPC_SUCCESS == (stat=rpcUdpRcv(0)) )
-					break;
-		}
-	}
-	return stat;
+#ifndef __rtems
+		do {
+			if (stat = sockSnd(xact)) {
+				fprintf(stderr,"Send failed: %i\n",stat);
+				return stat;
+			}
+			FD_ZERO(&rset);
+			FD_SET(ourSock, &rset);
+			/* linux tampers with this */
+			tmp = xact->server->retry_period;
+			sel_err=select(ourSock+1, &rset, 0, 0, &tmp);
+			if (sel_err > 0) {
+				/* OK */
+				if (!buf) buf = (RpcBuf)malloc(UDPMSGSIZE);
+				if ( sockRcv(&buf, UDPMSGSIZE) )
+					return rpcUdpRcv(xact);
+				fprintf(stderr,"Rcv failed '%s'\n",strerror(errno));
+			}
+		} while (xact->retrans--);
+
+		free(buf);
+
+		return RPC_TIMEDOUT;
+#else
+		return rpcUdpRcv(xact);
+#endif
 }
 
 #ifdef __rtems
 
-int rpcIoDoRun = 1; /* so they may stop it */
-
 static void
-rpcrx_daemon(void arg)
+nodeXtract(ListNode n)
 {
-enum clnt_stat	rxerr;
-RpcUdpXact		xact;
-
-	for (;rpcIoDoRun;) {
-
-		rxerr = rpcUdpRecv(&xact);
-
-		switch (rxerr) {
-			case RPC_SUCCESS:
-				/* cancel the retransmission timer */
-				if (xact->retrans_timer) {
-					/* here's a race condition; the timer could
-					 * have gone off
-					rtems_timer_delete(xact->retrans_timer);
-					xact->retrans_timer = 0;
-				}
-				/* wake up the requestor of the transaction */
-				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
-				break;
-
-			case RPC_CANTRCV:
-				if (EWOULDBLOCK == errno) {
-					/* receive timeout */
-
-					continue;
-				}
-
-			default: /* unknown error */
-				sleep(2);
-				break;
-		}
-	}
-
-	rtems_task_delete(RTEMS_SELF);
+	if (n->prev)
+		n->prev->next = n->next;
+	if (n->next)
+		n->next->prev = n->prev;
+	n->next = n->prev = 0;
 }
 
 static void
-rpctx_daemon(void arg)
+nodeAppend(ListNode l, ListNode n)
 {
-RpcUdpXact	xact;
-u_long		size;
-	for (;;) {
-		rtems_message_queue_receive(
-				rpcQ,
-				&xact,
-				&size,
-				RTEMS_WAIT,
-				RTEMS_NO_TIMEOUT);
-		if (!xact) {
-			/* empty transaction: cleanup */
-			break;
-		}
-		if (!xact->retrans_timer) {
-			assert(RTEMS_SUCCESSFUL == rtems_timer_create(
-											rtems_build_name('R','P','C','t'),
-											&xact->retrans_timer
-											));
-		}
-		if ( sendto(ourSock,
-				xact->obuf.buf,
-				len,
-				0,
-				(struct sockaddr*) &srvr->addr,
-				sizeof(srvr->addr)) != len ) {
-			xact->status.re_errno = errno;
-			xact->status.re_status=RPC_CANTSEND;
-			/* wakeup requestor */
-			rtems_event_send(xact->requestor, RPC_NFS_EVENT);
-		} else {
-			/* send successful; set timer */
-			if ( ! xact->retrans_timer ) {
-				xact->status.re_status = RPC_CANTSEND;
+	if (n->next = l->next)
+		n->next->prev = n;
+	l->next = n;
+	n->prev = l;
+	
+}
+
+static void
+rpcio_daemon(rtems_task_argument arg)
+{
+enum clnt_stat	 rxerr;
+RpcUdpXact		 xact;
+rtems_interval	 next_retrans, then, now;
+rtems_event_set	 events;
+rtems_id		 q;
+ListNodeRec		 listHead={0};
+ListNode		 newList;
+rtems_unsigned32 size;
+RpcBuf			 buf = 0;
+
+	assert( RTEMS_SUCCESSFUL == rtems_clock_get(
+									RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
+									&then) );
+
+	for (next_retrans=RTEMS_NO_TIMEOUT;;) {
+
+		rtems_event_receive(
+						RPCIOD_RX_EVENT | RPCIOD_TX_EVENT | RPCIOD_KILL_EVENT,
+						RTEMS_WAIT | RTEMS_EVENT_ANY, 
+						next_retrans,
+						&events);
+
+		if (events & RPCIOD_KILL_EVENT) {
+			int i;
+fprintf(stderr,"TSILL got KILL\n");
+
+			HASH_TBL_LOCK();
+			for (i=XACT_HASHS-1; i>=0; i--) {
+				if (xactHashTbl[i]) {
+					break;
+				}
+			}
+			if (i<0) {
+				/* prevent them from creating and enqueueing more messages */
+				q=msgQ;
+				/* messages queued after we executed this assignment will fail */
+				msgQ=0;
+			}
+			HASH_TBL_UNLOCK();
+			if (i>=0) {
+				fprintf(stderr,"There are still transactions circulating; I refuse to go away\n");
+				fprintf(stderr,"(1st in slot %i)\n",i);
+				rtems_semaphore_release(fini);
+			} else {
+				break;
 			}
 		}
 
+		/* NOTE: we don't lock the hash table while we are operating
+		 * on transactions; the paradigm is that we 'own' a particular
+		 * transaction (and hence it's hash table slot) from the
+		 * time the xact was put into the message queue until we
+		 * wake up the requestor.
+		 */
+
+		if (RPCIOD_RX_EVENT & events) {
+fprintf(stderr,"TSILL got RX\n");
+			if (!buf)
+				buf=(RpcBuf)malloc(UDPMSGSIZE);
+			while ((xact=sockRcv(&buf, UDPMSGSIZE))) {
+				/* extract from the retransmission list */
+				nodeXtract(&xact->node);
+				/* wakeup requestor */
+				xact->status.re_status = RPC_SUCCESS;
+				rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+			}
+		}
+
+		rtems_clock_get(
+				RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
+				&now);
+		/* measure everything relative to then to protect against
+		 * rollover
+		 */
+		now-=then;
+
+		if (RPCIOD_TX_EVENT & events) {
+fprintf(stderr,"TSILL got TX\n");
+			while (RTEMS_SUCCESSFUL == rtems_message_queue_receive(
+											msgQ,
+											&xact,
+											&size,
+											RTEMS_NO_WAIT,
+											RTEMS_NO_TIMEOUT)) {
+				/* put to the head of timeout q */
+				nodeAppend(&listHead, &xact->node);
+
+				xact->retrans++; /* account for initial transmission */
+				xact->age = now;
+			}
+		}
+
+
+		/* work the timeout q */
+		newList = 0;
+		for ( xact=(RpcUdpXact)listHead.next; xact && xact->age <= now; ) {
+
+				/* extract from the list */
+				nodeXtract(&xact->node);
+
+				if (--xact->retrans <= 0) {
+					/* this one timed out */
+					xact->status.re_status = RPC_TIMEDOUT;
+					rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+
+				} else {
+					int len;
+
+					len = (int)XDR_GETPOS(&xact->xdrs);
+				
+					if ( sendto(ourSock,
+						xact->obuf.buf,
+						len,
+						0,
+						(struct sockaddr*) &xact->server->addr,
+						sizeof(xact->server->addr)) != len ) {
+						xact->status.re_errno = errno;
+						xact->status.re_status=RPC_CANTSEND;
+						/* wakeup requestor */
+						rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+					} else {
+						/* send successful; calculate retransmission time
+						 * and enqueue to temporary list
+						 */
+						xact->age = now + xact->server->retry_period;
+						xact->node.next = newList;
+						newList = &xact->node;
+					}
+				}
+	    }
+
+		/* insert the newly sent transactions into the sorted retransmission
+		 * list
+		 */
+		for (; (xact = (RpcUdpXact)newList); ) {
+			register ListNode p,n;
+			newList = newList->next;
+			for ( p=&listHead; (n=p->next) && xact->age > ((RpcUdpXact)n)->age; p=n )
+				/* nothing else to do */;
+			nodeAppend(p, &xact->node);
+		}
+
+		if (now > 1000000) {
+			/* every now and then, readjust the epoch */
+			register ListNode n;
+			then += now;
+			for (n=listHead.next; n; n=n->next) {
+				((RpcUdpXact)n)->age-=now;
+			}
+		}
+
+		next_retrans = listHead.next ? ((RpcUdpXact)listHead.next)->age - now : RTEMS_NO_TIMEOUT;
 	}
-}
+	/* close our socket; shut down the receiver */
+	close(ourSock);
+
+#if 0 /* if we get here, no transactions exist, hence there can be none
+	   * in the queue whatsoever
+	   */
+	/* flush the message queue */
+	while (RTEMS_SUCCESSFUL == rtems_message_queue_receive(
+										q,
+										&xact,
+										&size,
+										RTEMS_NO_WAIT,
+										RTEMS_NO_TIMEOUT)) {
+			/* TODO enque xact */
+	}
+
+	/* flush all outstanding transactions */
+
+	for (xact=((RpcUdpXact)listHead.next); xact; xact=((RpcUdpXact)xact->node.next)) {
+			xact->status.re_status = RPC_TIMEDOUT;
+			rtems_event_send(xact->requestor, RTEMS_NFS_EVENT);
+	}
 #endif
 
-#ifdef __rtems
+	free(buf);
+
+	rtems_message_queue_delete(q);
+
+	rtems_semaphore_delete(hlock);
+
+	fprintf(stderr,"RPC daemon exited...\n");
+
+	rtems_semaphore_release(fini);
+	rtems_task_suspend(RTEMS_SELF);
+}
+
+_cexpModuleInitialize(void *mod)
+{
+	rpcUdpInit();
+}
+
+_cexpModuleFinalize(void *mod)
+{
+	rtems_semaphore_create(
+			rtems_build_name('R','P','C','f'),
+			0,
+			RTEMS_DEFAULT_ATTRIBUTES,
+			0,
+			&fini);
+	rtems_event_send(rpciod, RPCIOD_KILL_EVENT);
+	/* synchronize with daemon */
+	rtems_semaphore_obtain(fini, RTEMS_WAIT, 5*ticksPerSec);
+	/* if the message queue is still there, something went wrong */
+	rtems_task_delete(rpciod);
+	rtems_semaphore_delete(fini);
+	return (msgQ !=0);
+}
+
+
 #include <rtems/rtems_bsdnet_internal.h>
 /* double check the event configuration; should probably globally
  * manage system events!!

@@ -1,11 +1,19 @@
-INCS = -I. -I/afs/slac/package/rtems/prod/rtems/powerpc-rtems/svgm/lib/include
-INCS += -I. -I./proto/
+INCS = -I. -I./proto/
+ifdef RTEMS
+INCS += -I. -I/afs/slac/package/rtems/prod/rtems/powerpc-rtems/svgm/lib/include
+endif
 #DEFS = -DNFS
 CFLAGS = -O2 $(DEFS) $(INCS) -g
-#CC = powerpc-rtems-gcc
-LDFLAGS = -r -L./proto
+ifdef RTEMS
+CC = powerpc-rtems-gcc
+LD = powerpc-rtems-ld
+TARG = m.obj
+else
+TARG = m
+endif
+LDFLAGS += -L./proto
 
-#all: mount_nfs.o
+all: $(TARG)
 
 m: mnt.o rpcio.o
 	$(CC) -o $@ $^ $(LDFLAGS) -lnfsprot
@@ -13,5 +21,8 @@ m: mnt.o rpcio.o
 %.o: %.c
 	$(CC) -c -o $@ $(CFLAGS) $^
 
+m.obj: mnt.o rpcio.o
+	$(LD) -o $@ -r $^
+
 clean:
-	$(RM) *.o
+	$(RM) *.o m *.obj

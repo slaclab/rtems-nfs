@@ -1,4 +1,7 @@
+ifdef RTEMS
 INCS = -I/afs/slac/package/rtems/prod/rtems/powerpc-rtems/svgm/lib/include
+CC   = powerpc-rtems-gcc
+endif
 CFLAGS = -O $(INCS)
 RANLIB = ranlib
 

@@ -79,6 +79,6 @@ rpcUdpSend(
 	);
 
 enum clnt_stat
-rpcUdpRcv(RpcUdpXact *pxact);
+rpcUdpRcv(RpcUdpXact xact);
 
 #endif
