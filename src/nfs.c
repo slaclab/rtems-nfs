@@ -3007,8 +3007,15 @@ rtems_device_driver nfs_initialize(
 )
 {
 	/* we don't really use this routine because
-	 * the return value is not evaluated by the
-	 * system.
+     * we cannot supply an argument (contrary
+     * to what the 'arg' parameter suggests - it
+     * is always set to 0 by the generics :-()
+     * and because we don't want the user to
+     * have to deal with the major number (which
+     * OTOH is something WE are interested in. The
+     * only reason for using this API was getting
+     * a major number, after all).
+     *
 	 * Something must be present, however, to 
 	 * reserve a slot in the driver table.
 	 */
