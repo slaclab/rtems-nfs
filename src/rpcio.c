@@ -827,7 +827,7 @@ struct sockwakeup	wkup;
 
 	fprintf(stderr,"This is RTEMS-RPCIOD Release $Name$\n");
 	fprintf(stderr,"($Id$)\n\n");
-	fprintf(stderr,"Till Straumann, Stanford 2002\n");
+	fprintf(stderr,"Till Straumann, Stanford/SLAC/SSRL 2002\n");
 	fprintf(stderr,"See LICENSE file for licensing info\n");
 
 	if (ourSock < 0) {

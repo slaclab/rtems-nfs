@@ -64,10 +64,9 @@ The package consists of two modules: RPCIOD and NFS itself.
    timeouts etc.
    Note however, that it does NOT do any XDR
    marshalling - it is up to the requestor threads
-   to do the XDR encoding/decoding.
-   RPCIOD _is_ RPC specific, though, because its
-   message dispatching is based on the RPC transaction
-   ID.
+   to do the XDR encoding/decoding. RPCIOD _is_ RPC
+   specific, though, because its message dispatching
+   is based on the RPC transaction ID.
 
  - The NFS package maps RTEMS filesystem calls
    to proper RPCs, it does the XDR work and
@@ -77,7 +76,6 @@ The package consists of two modules: RPCIOD and NFS itself.
 
 1) Performance
 - - - - - - - -
-
 Performance sucks (due to the lack of readahead/delayed
 write and caching). On a fast (100Mb/s) ethernet, it
 takes about 20s to copy a 10MB file from NFS to NFS.
