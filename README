@@ -30,6 +30,7 @@ II  Usage
   2) Mounting Remote Server Filesystems
   3) Unmounting
   4) Unloading
+  5) Dumping Information / Statistics
 
 III Implementation Details
   1) RPCIOD
@@ -220,6 +221,9 @@ There are two interfaces for mounting an NFS:
      NOTE: If the mount point does not exist yet,
            nfsMount() tries to create it.
 
+   o if nfsMount() is called with a NULL 'uidgid_at_host'
+     argument, it lists all currently mounted NFS
+
 3) Unmounting
 - - - - - - -
 An NFS can be unmounted using RTEMS 'unmount()'
@@ -246,6 +250,22 @@ of them refuses to yield (e.g. because there are
 still mounted filesystems).
 Again, when unloading is done by CEXP this is
 transparently handled.
+
+5) Dumping Information / Statistics
+- - - - - - - - - - - - - - - - - -
+
+Rudimentary RPCIOD statistics are printed
+to a file (stdout when NULL) by
+
+  int rpcUdpStats(FILE *f)
+
+A list of all currently mounted NFS can be
+printed to a file (stdout if NULL) using
+
+  int nfsMountsShow(FILE *f)
+
+For convenience, this routine is also called
+by nfsMount() when supplying NULL arguments.
 
 III Implementation Details
 --------------------------
@@ -366,7 +386,7 @@ RPCIOD:
  o 1 task 
  o 1 message queue
  o 1 socket/filedescriptor
- o 1 semaphore (a second one is temporarily created during
+ o 2 semaphores (a third one is temporarily created during
    rpcUdpCleanup()).
  o 1 RTEMS EVENT (by default RTEMS_EVENT_30).
    IMPORTANT: this event is used by _every_ thread executing
@@ -381,11 +401,13 @@ RPCIOD:
 
 NFS:
  o 2 message queues
- o 1 semaphore
+ o 2 semaphores
  o 1 semaphore per mounted NFS
  o 1 slot in driver entry table (for major number)
  o preemption disabled sections:      NONE
  o sections with interrupts disabled: NONE
+ o 1 task + 1 semaphore temporarily created when
+   listing mounted filesystems (rtems_filesystem_resolve_location())
 
 4) CAVEATS & BUGS
 - - - - - - - - -
