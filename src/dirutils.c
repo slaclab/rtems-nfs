@@ -1,14 +1,18 @@
+#ifdef __vxworks
+#include <vxWorks.h>
+#endif
 #include <stdio.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/errno.h>
+#include <errno.h>
 #include <stdlib.h>
 
 #define BUFFERSZ 10000
 
+#ifndef __vxworks
 int
 pwd(void)
 {
@@ -92,6 +96,7 @@ cleanup:
 		closedir(dp);
 	return rval;
 }
+#endif
 
 int
 cp(char *from, char *to, char *opts)
@@ -104,7 +109,7 @@ int			ffd   = -1;
 int			tfd   = -1;
 int			flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL;
 
-	if ((ffd=open(from,O_RDONLY)) < 0) {
+	if ((ffd=open(from,O_RDONLY,0)) < 0) {
 		fprintf(stderr,
 				"Opening %s for reading: %s\n",
 				from,
