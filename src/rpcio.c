@@ -33,7 +33,7 @@
 /* CONFIGURABLE PARAMETERS                                      */
 /****************************************************************/
 
-#define MBUF_RX			/* If defined: use mbuf XDR stream for
+#define  MBUF_RX		/* If defined: use mbuf XDR stream for
 						 * decoding directly out of mbufs
 						 * Otherwise, the regular sendto/recvfrom
 						 * interface will be used involving an
@@ -52,6 +52,15 @@
 /* Maximum retry limit for retransmission */
 #define RPCIOD_RETX_CAP_S	3 /* seconds */
 
+/* Default timeout for RPC calls */
+#define RPCIOD_DEFAULT_TIMEOUT	(&_rpc_default_timeout)
+static struct timeval _rpc_default_timeout = { 10 /* secs */, 0 /* usecs */ };
+
+/* how many times should we try to resend a failed
+ * transaction with refreshed AUTHs
+ */
+#define RPCIOD_RESEND		2
+
 #ifdef __rtems
 /* Events we are using; the RPC_EVENT
  * MUST NOT be used by any application
@@ -67,7 +76,7 @@
 
 #endif
 
-#define LD_XACT_HASH	8					/* ld of the size of the transaction hash table  */
+#define LD_XACT_HASH		8				/* ld of the size of the transaction hash table  */
 
 
 /* Debugging Flags                                              */
@@ -77,7 +86,7 @@
 #define DEBUG_MALLOC		(1<<2)
 #define DEBUG_TIMEOUT		(1<<3)
 
-#define DEBUG	DEBUG_TIMEOUT
+#define DEBUG	(DEBUG_MALLOC | DEBUG_TRACE_XACT | DEBUG_TIMEOUT | DEBUG_EVENTS)
 
 /****************************************************************/
 /* END OF CONFIGURABLE SECTION                                  */
@@ -88,6 +97,12 @@
 #undef	 MBUF_RX
 #endif
 
+/* prevent rollover of our timers by readjusting the epoch on the fly */
+#if	DEBUG & DEBUG_TIMEOUT
+#define RPCIOD_EPOCH_SECS	10
+#else
+#define RPCIOD_EPOCH_SECS	10000
+#endif
 
 #ifdef __rtems
 
@@ -173,10 +188,13 @@ typedef union  RpcBufU_ {
  */
 #ifdef MBUF_RX
 typedef	struct mbuf *		RxBuf;	/* an MBUF chain */
-static  void   bufFree(struct mbuf *m);
+static  void   				bufFree(struct mbuf *m);
+#define XID(ibuf) 			(*(mtod((ibuf), u_long *)))
+extern void 				xdrmbuf_create(XDR *, struct mbuf *, enum xdr_op);
 #else
 typedef RpcBuf				RxBuf;
-#define	bufFree(b)	do { FREE(b); } while(0)
+#define	bufFree(b)			do { FREE(b); } while(0)
+#define XID(ibuf) 			((ibuf)->xid)
 #endif
 
 /* A RPC 'transaction' consisting
@@ -188,6 +206,8 @@ typedef struct RpcUdpXactRec_ {
 		ListNodeRec			node;		/* so we can put XACTs on a list                */
 		RpcUdpServer		server;		/* server this XACT goes to                     */
 		long				lifetime;	/* during the lifetime, retry attempts are made */
+		long				tolive;		/* lifetime timer                               */
+		long				resend;		/* resend attempts								*/
 		struct rpc_err		status;		/* RPC reply error status                       */
 #ifdef __rtems
 		long				age;		/* age info; needed to manage retransmission    */
@@ -282,31 +302,98 @@ static inline void FREE(void *p)
 /* Create a server object
  *
  */
-RpcUdpServer
+enum clnt_stat
 rpcUdpServerCreate(
 	struct sockaddr_in	*paddr,
 	int					prog,
 	int					vers,
+	u_long				uid,
+	u_long				gid,
+	RpcUdpServer		*psrv
 	)
 {
 RpcUdpServer	rval;
 u_short			port;
+char			hname[MAX_MACHINE_NAME + 1];
+int				theuid, thegid;
+int				thegids[NGRPS];
+gid_t			gids[NGROUPS];
+int				len,i;
+AUTH			*auth;
+enum clnt_stat	pmap_err;
+struct pmap		pmaparg;
+
+	if ( gethostname(hname, MAX_MACHINE_NAME) ) {
+		fprintf(stderr,
+				"RPCIO - error: I have no hostname ?? (%s)\n",
+				strerror(errno));
+		return RPC_UNKNOWNHOST;
+	}
+
+	if ( (len = getgroups(NGROUPS, gids) < 0 ) ) {
+		fprintf(stderr,
+				"RPCIO - error: I unable to get group ids (%s)\n",
+				strerror(errno));
+		return RPC_FAILED;
+	}
+
+	if ( len > NGRPS )
+		len = NGRPS;
+
+	for (i=0; i<len; i++)
+		thegids[i] = (int)gids[i];
+
+	theuid = (int) ((RPCIOD_DEFAULT_ID == uid) ? geteuid() : uid);
+	thegid = (int) ((RPCIOD_DEFAULT_ID == gid) ? getegid() : gid);
+
+	if ( !(auth = authunix_create(hname, theuid, thegid, len, thegids)) ) {
+		fprintf(stderr,
+				"RPCIO - error: unable to create RPC AUTH\n");
+		return RPC_FAILED;
+	}
 
 	/* if they specified no port try to ask the portmapper */
 	if (!paddr->sin_port) {
+
 		paddr->sin_port = htons(PMAPPORT);
-		port            = pmap_getport(paddr, prog, vers ,IPPROTO_UDP);
+
+        pmaparg.pm_prog = prog;
+        pmaparg.pm_vers = vers;
+        pmaparg.pm_prot = IPPROTO_UDP;
+        pmaparg.pm_port = 0;  /* not needed or used */
+
+
+		/* dont use non-reentrant pmap_getport ! */
+
+		pmap_err = rpcUdpCallRp(
+						paddr, 
+						PMAPPROG,
+						PMAPVERS,
+						PMAPPROC_GETPORT,
+						xdr_pmap,
+						&pmaparg,
+						xdr_u_short,
+						&port,
+						uid,
+						gid,
+						0);
+
+		if ( RPC_SUCCESS != pmap_err ) {
+			paddr->sin_port = 0;
+			return pmap_err;
+		}
+
 		paddr->sin_port = htons(port);
 	}
 
 	if (0==paddr->sin_port) {
-			return 0;
+			return RPC_PROGNOTREGISTERED;
 	} 
 
 	rval       			= (RpcUdpServer)MALLOC(sizeof(*rval));
 	memset(rval, 0, sizeof(*rval));
 
-	if (!inet_ntop(AF_INET, paddr, rval->name, sizeof(rval->name)))
+	if (!inet_ntop(AF_INET, &paddr->sin_addr, rval->name, sizeof(rval->name)))
 		sprintf(rval->name,"?.?.?.?");
 	rval->addr 			= *paddr;
 
@@ -315,9 +402,12 @@ u_short			port;
 	 */
 	rval->retry_period  = RPCIOD_RETX_CAP_S * ticksPerSec; 
 
-	/* TODO handle / configure credentials - lifetime? */
-	rval->auth 			= authunix_create_default();
-	return rval;
+	/* TODO handle credential lifetime? */
+
+	rval->auth 			= auth;
+
+	*psrv				= rval;
+	return RPC_SUCCESS;
 }
 
 void
@@ -358,6 +448,7 @@ register int	i,j;
 		header.rm_call.cb_prog    = program;
 		header.rm_call.cb_vers    = version;
 		xdrmem_create(&(rval->xdrs), rval->obuf.buf, size, XDR_ENCODE);
+
 		if (!xdr_callhdr(&(rval->xdrs), &header)) {
 			FREE(rval);
 			return 0;
@@ -430,7 +521,7 @@ enum clnt_stat
 rpcUdpSend(
 	RpcUdpXact		xact,
 	RpcUdpServer	srvr,
-	struct timeval	timeout,
+	struct timeval	*timeout,
 	u_long			proc,
 	xdrproc_t		xres, caddr_t pres,
 	xdrproc_t		xargs, caddr_t pargs,
@@ -444,7 +535,10 @@ va_list			ap;
 
 	va_start(ap,pargs);
 
-	ms = 1000 * timeout.tv_sec + timeout.tv_usec/1000;
+	if (!timeout)
+		timeout = RPCIOD_DEFAULT_TIMEOUT;
+
+	ms = 1000 * timeout->tv_sec + timeout->tv_usec/1000;
 
 #ifdef __rtems
 	xact->lifetime  = ms * ticksPerSec / 1000;
@@ -463,11 +557,14 @@ va_list			ap;
 						  srvr->retry_period.tv_usec/1000);
 #endif
 
+	xact->tolive    = xact->lifetime;
+	xact->resend	= RPCIOD_RESEND;
+
 	xact->xres      = xres;
 	xact->pres      = pres;
 	xact->server    = srvr;
 
-	xdrs=&xact->xdrs;
+	xdrs            = &xact->xdrs;
 	xdrs->x_op      = XDR_ENCODE;
 	/* increment transaction ID */
 	xact->obuf.xid += XACT_HASHS;
@@ -498,10 +595,6 @@ va_list			ap;
 	return RPC_SUCCESS;
 }
 
-#ifdef MBUF_RX
-extern void xdrmbuf_create(XDR *, struct mbuf *, enum xdr_op);
-#endif
-
 /* Block for the RPC reply to an outstanding
  * transaction.
  * The caller is woken by the RPC daemon either
@@ -519,14 +612,12 @@ rtems_event_set		gotEvents;
 
 #ifdef __rtems
 	/* block for the reply */
-	rtems_event_receive(
-			RTEMS_RPC_EVENT,
-			RTEMS_WAIT | 
-"todo - is this the correct flag? we don't want to lose other events that
-task might receive"
-RTEMS_EVENT_ANY,
-			RTEMS_NO_TIMEOUT,
-			&gotEvents);
+	assert( RTEMS_SUCCESSFUL ==
+			rtems_event_receive(
+					RTEMS_RPC_EVENT,
+					RTEMS_WAIT | RTEMS_EVENT_ANY,
+					RTEMS_NO_TIMEOUT,
+					&gotEvents) );
 
 	if (xact->status.re_status) {
 #ifdef MBUF_RX
@@ -569,7 +660,9 @@ RTEMS_EVENT_ANY,
 
 	bufFree(xact->ibuf);
 	xact->ibuf     = 0;
+#ifndef MBUF_RX
 	xact->ibufsize = 0;
+#endif
 
 	return xact->status.re_status;
 }
@@ -579,6 +672,7 @@ static enum clnt_stat
 sockSnd(RpcUdpXact xact)
 {
 int len = (int)XDR_GETPOS(&xact->xdrs);
+
 	if ( sendto(ourSock,
 				xact->obuf.buf,
 				len,
@@ -590,13 +684,6 @@ int len = (int)XDR_GETPOS(&xact->xdrs);
 	}
 	return RPC_SUCCESS;
 }
-
-#ifdef MBUF_RX
-#define XID(ibuf) (*(mtod((ibuf), u_long *)))
-#else
-#define XID(ibuf) ((ibuf)->xid)
-#endif
-
 
 #ifdef __rtems
 /* On RTEMS, I'm told to avoid select(); this seems to
@@ -673,32 +760,37 @@ struct sockwakeup	wkup;
  * clnt_call() etc. API - but it uses our
  * daemon and is fully reentrant.
  */
-RpcUdpClnt
+enum clnt_stat
 rpcUdpClntCreate(
 		struct sockaddr_in *psaddr,
 		int					prog,
 		int					vers,
-		struct timeval		retry_timeout /* ignored */
+		u_long				uid,
+		u_long				gid,
+		RpcUdpClnt			*pclnt
 )
 {
 RpcUdpXact		x;
 RpcUdpServer	s;
+enum clnt_stat	err;
 
-	if ( !(s = rpcUdpServerCreate(psaddr, prog, vers)) )
-		return 0;
+	if ( RPC_SUCCESS != (err=rpcUdpServerCreate(psaddr, prog, vers, uid, gid, &s)) )
+		return err;
 
 	if ( !(x=rpcUdpXactCreate(prog, vers, UDPMSGSIZE)) ) {
 		rpcUdpServerDestroy(s);
-		return 0;
+		return RPC_FAILED;
 	}
 	/* TODO: could maintain a server cache */
 
 	x->server = s;
+	
+	*pclnt = x;
 
-	return x;
+	return RPC_SUCCESS;
 }
 
-enum clnt_stat
+void
 rpcUdpClntDestroy(RpcUdpClnt xact)
 {
 	rpcUdpServerDestroy(xact->server);
@@ -713,7 +805,7 @@ rpcUdpClntCall(
 	CaddrT			pargs,
 	XdrProcT		xres,
 	CaddrT			pres,
-	struct timeval	timeout
+	struct timeval	*timeout
 	)
 {
 enum clnt_stat	stat;
@@ -750,7 +842,7 @@ RxBuf			buf = 0;
 					return rpcUdpRcv(xact);
 				fprintf(stderr,"Rcv failed '%s'\n",strerror(errno));
 			}
-		} while (xact->lifetime--);
+		} while (xact->tolive--);
 
 		bufFree(buf);
 
@@ -759,6 +851,51 @@ RxBuf			buf = 0;
 		return rpcUdpRcv(xact);
 #endif
 }
+
+/* a yet simpler interface */
+enum clnt_stat
+rpcUdpCallRp(
+	struct sockaddr_in	*psrvr,
+	u_long				prog,
+	u_long				vers,
+	u_long				proc,
+	XdrProcT			xargs,
+	CaddrT				pargs,
+	XdrProcT			xres,
+	CaddrT				pres,
+	u_long				uid,		/* RPCIO_DEFAULT_ID picks default */
+	u_long				gid,		/* RPCIO_DEFAULT_ID picks default */
+	struct timeval		*timeout	/* NULL picks default		*/
+)
+{
+RpcUdpClnt			clp;
+int					retry;
+enum clnt_stat		stat;
+
+	stat = rpcUdpClntCreate(
+				psrvr,
+				prog,
+				vers,
+				uid,
+				gid,
+				&clp);
+
+	if ( RPC_SUCCESS != stat )
+		return stat;
+
+	stat = rpcUdpClntCall(
+				clp,
+				proc,
+				xargs, pargs,
+				xres,  pres,
+				timeout);
+
+	rpcUdpClntDestroy(clp);
+
+	return stat;
+}
+
+
 
 #ifdef __rtems
 
@@ -787,30 +924,36 @@ nodeAppend(ListNode l, ListNode n)
 static void
 rpcio_daemon(rtems_task_argument arg)
 {
-enum clnt_stat   rxerr;
-RpcUdpXact       xact;
-RpcUdpServer     srv;
-char             strbuf[20];
-char             *chpt;
-rtems_interval   next_retrans, then, now;
-rtems_event_set  events;
-rtems_id         q;
-ListNode         newList;
-rtems_unsigned32 size;
-RxBuf            buf      =  0;
-ListNodeRec      listHead = {0};
+rtems_status_code stat;
+enum clnt_stat    rxerr;
+RpcUdpXact        xact;
+RpcUdpServer      srv;
+char              strbuf[20];
+char              *chpt;
+rtems_interval    next_retrans, then, now;
+rtems_event_set   events;
+rtems_id          q;
+ListNode          newList;
+rtems_unsigned32  size;
+RxBuf             buf      =  0;
+ListNodeRec       listHead = {0};
+unsigned long     epoch    = RPCIOD_EPOCH_SECS * ticksPerSec;
 
 	assert( RTEMS_SUCCESSFUL == rtems_clock_get(
 									RTEMS_CLOCK_GET_TICKS_SINCE_BOOT,
 									&then) );
 
-	for (next_retrans=RTEMS_NO_TIMEOUT;;) {
+	for (next_retrans = epoch;;) {
 
-		rtems_event_receive(
+		if ( RTEMS_SUCCESSFUL !=
+			 (stat = rtems_event_receive(
 						RPCIOD_RX_EVENT | RPCIOD_TX_EVENT | RPCIOD_KILL_EVENT,
 						RTEMS_WAIT | RTEMS_EVENT_ANY, 
 						next_retrans,
-						&events);
+						&events)) ) {
+			assert( RTEMS_TIMEOUT == stat );
+			events = 0;
+		}
 
 		if (events & RPCIOD_KILL_EVENT) {
 			int i;
@@ -890,6 +1033,11 @@ ListNodeRec      listHead = {0};
 					if (0==rtry)
 						rtry = 1;
 					srv->retry_period = rtry;
+
+					assert( (unsigned long)rtry < 5*epoch );
+
+					if ( rtry > ticksPerSec * RPCIOD_RETX_CAP_S )
+						rtry = ticksPerSec * RPCIOD_RETX_CAP_S;
 				}
 
 				/* wakeup requestor */
@@ -939,7 +1087,7 @@ ListNodeRec      listHead = {0};
 
 				srv = xact->server;
 
-				if (xact->lifetime < 0) {
+				if (xact->tolive < 0) {
 					/* this one timed out */
 					xact->status.re_errno  = ETIMEDOUT;
 					xact->status.re_status = RPC_TIMEDOUT;
@@ -978,8 +1126,8 @@ ListNodeRec      listHead = {0};
 						if (FIRST_ATTEMPT != xact->trip) {
 #if DEBUG & DEBUG_TIMEOUT
 							fprintf(stderr,
-									"timed out; retrans is %i, retry period is %i\n",
-									xact->retrans,
+								"timed out; tolive is %i (ticks), retry period is %i (ticks)\n",
+									xact->tolive,
 									srv->retry_period);
 #endif
 							/* this is a real retry; we backup
@@ -1017,10 +1165,17 @@ ListNodeRec      listHead = {0};
 						}
 						xact->trip      = now;
 						xact->age       = now + srv->retry_period;
-						xact->lifetime -= srv->retry_period;
+						xact->tolive   -= srv->retry_period;
 						/* enqueue to the list of newly sent transactions */
 						xact->node.next = newList;
 						newList         = &xact->node;
+#if DEBUG & DEBUG_TIMEOUT
+						fprintf(stderr,
+								"XACT (0x%08x) age is 0x%x, now: 0x%x\n",
+								xact,
+								xact->age,
+								now);
+#endif
 					}
 				}
 	    }
@@ -1036,22 +1191,32 @@ ListNodeRec      listHead = {0};
 			nodeAppend(p, &xact->node);
 		}
 
-		if (now > 1000000) {
+		if (now > epoch) {
 			/* every now and then, readjust the epoch */
 			register ListNode n;
 			then += now;
 			for (n=listHead.next; n; n=n->next) {
 				/* age = oldnow + age - newnow */
-				((RpcUdpXact)n)->age  -= now;
+				((RpcUdpXact)n)->age  += now;
+#if DEBUG & DEBUG_TIMEOUT
+				fprintf(stderr,
+						"readjusted XACT (0x%08x); age is 0x%x, now: 0x%x\n",
+						(RpcUdpXact)n,
+						((RpcUdpXact)n)->age,
+						now);
+#endif
 				/* roundtrip = arrive - sent = arrive + newthen - (sent + oldthen)
 				 *                           = arrive + newthen - (sent + newthen - oldthen)
 				 *  ==> sent = (sent - oldthen) + newthen = sent + now;
 				 */
-				((RpcUdpXact)n)->trip += now;
+				((RpcUdpXact)n)->trip -= now;
 			}
+			now = 0;
 		}
 
-		next_retrans = listHead.next ? ((RpcUdpXact)listHead.next)->age - now : RTEMS_NO_TIMEOUT;
+		next_retrans = listHead.next ?
+							((RpcUdpXact)listHead.next)->age - now :
+							epoch;	/* make sure we don't miss updating the epoch */
 #if DEBUG & DEBUG_TIMEOUT
 		fprintf(stderr,"RPCIO: next timeout is %x\n",next_retrans);
 #endif
@@ -1093,11 +1258,13 @@ ListNodeRec      listHead = {0};
 }
 
 /* CEXP module support (magic init) */
+static void
 _cexpModuleInitialize(void *mod)
 {
 	rpcUdpInit();
 }
 
+static int
 _cexpModuleFinalize(void *mod)
 {
 	rtems_semaphore_create(
@@ -1238,7 +1405,7 @@ struct sockaddr_in	fromAddr;
 int					fromLen  = sizeof(fromAddr);
 
 #ifdef MBUF_RX
-	len = recv_mbuf_from(ourSock,
+	len  = recv_mbuf_from(ourSock,
 					pibuf,
 					UDPMSGSIZE,
 				   (struct sockaddr*)&fromAddr, &fromLen);
@@ -1262,11 +1429,25 @@ int					fromLen  = sizeof(fromAddr);
 		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
 		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
 		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
+		if (xact) {
+			fprintf(stderr,"xact: xid  0x%08x  -- got 0x%08x\n",
+							xact->obuf.xid, xid);
+			fprintf(stderr,"xact: addr 0x%08x  -- got 0x%08x\n",
+							xact->server->addr.sin_addr.s_addr,
+							fromAddr.sin_addr.s_addr);
+			fprintf(stderr,"xact: port 0x%08x  -- got 0x%08x\n",
+							xact->server->addr.sin_port,
+							fromAddr.sin_port);
+		} else {
+			fprintf(stderr,"got xid 0x%08x but its slot is empty\n",xid);
+		}
 		xact = 0;
 		goto cleanup;
 	}
 	xact->ibuf     = *pibuf;
+#ifndef MBUF_RX
 	xact->ibufsize = ibufsize;
+#endif
 	*pibuf         = 0;
 
 cleanup:

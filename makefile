@@ -7,7 +7,7 @@ CFLAGS = -O2 $(DEFS) $(INCS) -g
 ifdef RTEMS
 CC = powerpc-rtems-gcc
 LD = powerpc-rtems-ld
-TARG = nfs.obj
+TARG = nfs.obj rpcio.obj
 else
 TARG = m
 endif
@@ -24,8 +24,12 @@ m: mnt.o rpcio.o
 nfs.obj: nfs.o
 	$(LD) -o $@ -r $^ -Lproto  -lnfsprot
 
+
 rpcio.obj: rpcio.o xdr_mbuf.o sock_mbuf.o
 	$(LD) -o $@ -r $^
 
 clean:
 	$(RM) *.o m *.obj
+
+install: all
+	install $(TARG) /tftpboot

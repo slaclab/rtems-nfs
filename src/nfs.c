@@ -51,17 +51,15 @@
 #define CONFIG_NFS_BIG_XACT_SIZE		UDPMSGSIZE	/* dont change this */
 
 /* The real values for these are specified further down */
-#define NFSCALL_TIMEOUT					_nfscalltimeout
-#define MNTCALL_TIMEOUT					_nfscalltimeout
-#define NFSCALL_RETRYPERIOD				_nfscallretry
-#define MNTCALL_RETRYPERIOD				_nfscallretry
+#define NFSCALL_TIMEOUT					(&_nfscalltimeout)
+#define MNTCALL_TIMEOUT					(&_nfscalltimeout)
 static struct timeval _nfscalltimeout = { 10, 0 };	/* {secs, us } */
-static struct timeval _nfscallretry   = { 1,  0 };	/* {secs, us } */
 
 /* More or less fixed constants; in particular, NFS3 is not supported */
 #define DELIM							'/'
 #define HOSTDELIM						':'
 #define UPDIR							".."
+#define UIDSEP							'@'
 #define NFS_VERSION_2					NFS_VERSION
 
 /* we use a dynamically assigned major number */
@@ -464,6 +462,9 @@ typedef struct NfsRec_ {
 		 * is anchored at nfsGlob 
 		 */
 	struct NfsRec_						 *next;
+		/* Who we pretend we are
+		 */
+	u_long								 uid,gid;
 } NfsRec, *Nfs;
 
 typedef struct NfsNodeRec_ {
@@ -1019,6 +1020,11 @@ int				rval = -1;
 
 	xact = rpcUdpXactPoolGet(pool, XactGetCreate);
 
+	if ( !xact ) {
+		errno = ENOMEM;
+		return -1;
+	}
+
 	if ( RPC_SUCCESS != (stat=rpcUdpSend(
 								xact,
 								srvr,
@@ -1103,8 +1109,9 @@ updateAttr(NfsNode node, int force)
  * gethostbyname() since it's not reentrant.
  *
  * initialize a sockaddr_in from a
- * "<host>':'<path>" string and let
- * pPath point to the <path> part
+ * [<uid>'.'<gid>'@']<host>':'<path>" string and let
+ * pPath point to the <path> part; retrieve the optional
+ * uid/gids
  *
  * ARGS:	see description above
  *
@@ -1112,12 +1119,34 @@ updateAttr(NfsNode node, int force)
  * 			-1 on failure with errno set
  */
 static int
-buildIpAddr(char **pPath, struct sockaddr_in *psa)
+buildIpAddr(u_long *puid, u_long *pgid,
+			char **pHost, struct sockaddr_in *psa,
+			char **pPath)
 {
 char	host[30];
 char	*chpt = *pPath;
 char	*path;
 int		len;
+
+	if ( !chpt ) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* look for the optional uid/gid */
+	if ( (chpt = strchr(chpt, UIDSEP)) ) {
+		if ( 2 != sscanf(*pPath,"%i.%i",puid,pgid) ) {
+			errno = EINVAL;
+			return -1;
+		}
+		chpt++;
+	} else {
+		*puid = RPCIOD_DEFAULT_ID;
+		*pgid = RPCIOD_DEFAULT_ID;
+		chpt  = *pPath;
+	}
+	if ( pHost )
+		*pHost = chpt;
 
 	/* split the device name which is in the form
 	 *
@@ -1126,8 +1155,7 @@ int		len;
 	 * into its components using a local buffer
 	 */
 
-	if ( !(chpt) ||
-		 !(path = strchr(chpt, HOSTDELIM)) ||
+	if ( !(path = strchr(chpt, HOSTDELIM)) ||
 	      (len  = path - chpt) >= sizeof(host) - 1 ) {
 		errno = EINVAL;
 		return -1;
@@ -1145,14 +1173,14 @@ int		len;
 
 	psa->sin_family = AF_INET;
 	psa->sin_port   = 0;
-	*pPath   = path;
+	*pPath          = path;
 	return 0;
 }
 
 /* wrapper similar to nfscall.
  * However, since it is not used
  * very often, the simpler and less
- * efficient rpcUdpClnt API is used.
+ * efficient rpcUdpCallRp API is used.
  *
  * ARGS:	see 'nfscall()' above
  *
@@ -1165,39 +1193,33 @@ mntcall(
 	xdrproc_t			xargs,
 	void *				pargs,
 	xdrproc_t			xres,
-	void *				pres)
+	void *				pres,
+	u_long				uid,
+	u_long				gid)
 {
 RpcUdpClnt			clp;
 int					retry;
-enum clnt_stat		stat;
+enum clnt_stat		stat = RPC_FAILED;
 
 #ifdef MOUNT_V1_PORT
 	/* if the portmapper fails, retry a fixed port */
-	for (retry = 1, clp = 0;
-		 retry >= 0 && !clp;
-		 saddr.sin_port = htons(MOUNT_V1_PORT), retry-- )
+	for (retry = 1, psrvr->sin_port = 0, stat = RPC_FAILED;
+		 retry >= 0 && stat;
+		 stat && (psrvr->sin_port = htons(MOUNT_V1_PORT)), retry-- )
 #endif
-		clp  = rpcUdpClntCreate(
-				psrvr,
-				MOUNT_PROGRAM,
-				MOUNT_V1,
-				MNTCALL_RETRYPERIOD);
-
-	if (!clp) {
-		fprintf(stderr,
-				"Unable to create MOUNT client - invalid server/port?\n");
-		return RPC_UNKNOWNPROTO;
-	}
-
-	stat = rpcUdpClntCall(
-					clp,
-					proc,
-					xargs, pargs,
-					xres,  pres,
-					MNTCALL_TIMEOUT);
-
-	rpcUdpClntDestroy(clp);
-
+		stat  = rpcUdpCallRp(
+						psrvr,
+						MOUNT_PROGRAM,
+						MOUNT_V1,
+						proc,
+						xargs,
+						pargs,
+						xres,
+						pres,
+						uid,
+						gid,
+						MNTCALL_TIMEOUT
+				);
 	return stat;
 }
 
@@ -1741,36 +1763,41 @@ STATIC int nfs_fsmount_me(
 )
 {
 char				*host;
-int					retry;
 struct sockaddr_in	saddr;
 enum clnt_stat		stat;
 fhstatus			fhstat;
+u_long				uid,gid;
+int					retry;
 Nfs					nfs       = 0;
 NfsNode				rootNode  = 0;
 RpcUdpServer		nfsServer = 0;
 int					e         = -1;
 char				*path     = mt_entry->dev;
 
-	host = path;
-	if (buildIpAddr(&path, &saddr))
+
+	if ( buildIpAddr(&uid, &gid, &host, &saddr, &path) )
 		return -1;
 
 
 #ifdef NFS_V2_PORT
 	/* if the portmapper fails, retry a fixed port */
-	for (retry = 1;
-		 retry >= 0 && !nfsServer;
-		 saddr.sin_port = htons(NFS_V2_PORT), retry-- )
+	for (retry = 1, saddr.sin_port = 0, stat = RPC_FAILED;
+		 retry >= 0 && stat;
+		 stat && (saddr.sin_port = htons(NFS_V2_PORT)), retry-- )
 #endif
-		nfsServer = rpcUdpServerCreate(
-							&saddr,
-							NFS_PROGRAM,
-							NFS_VERSION_2,
-							NFSCALL_RETRYPERIOD);
+		stat = rpcUdpServerCreate(
+					&saddr,
+					NFS_PROGRAM,
+					NFS_VERSION_2,
+					uid,
+					gid,
+					&nfsServer
+					);
 
-	if ( !nfsServer ) {
+	if ( RPC_SUCCESS != stat ) {
 		fprintf(stderr,
-				"Unable to contact NFS server - invalid port?\n");
+				"Unable to contact NFS server - invalid port? (%s)\n",
+				clnt_sperrno(stat));
 		e = EPROTONOSUPPORT;
 		goto cleanup;
 	}
@@ -1779,10 +1806,10 @@ char				*path     = mt_entry->dev;
 	/* first, try to ping the NFS server by
 	 * calling the NULL proc.
 	 */
-	if (nfscall(nfsServer,
+	if ( nfscall(nfsServer,
 					 NFSPROC_NULL,
 					 xdr_void, 0,
-					 xdr_void, 0)) {
+					 xdr_void, 0) ) {
 
 		fputs("NFS Ping ",stderr);
 		fwrite(host, 1, path-host-1, stderr);
@@ -1806,7 +1833,9 @@ char				*path     = mt_entry->dev;
 					xdr_dirpath,
 					&path,
 					xdr_fhstatus,
-					&fhstat );
+					&fhstat,
+				 	uid,
+				 	gid );
 
 	if (stat) {
 		fprintf(stderr,"MOUNT -- %s\n",clnt_sperrno(stat));
@@ -1824,6 +1853,9 @@ char				*path     = mt_entry->dev;
 
 	assert( nfs = nfsCreate(nfsServer) );
 	nfsServer = 0;
+
+	nfs->uid  = uid;
+	nfs->gid  = gid;
 
 	/* that seemed to work - we now create the root node
 	 * and we also must obtain the root node attributes
@@ -1882,6 +1914,7 @@ enum clnt_stat		stat;
 struct sockaddr_in	saddr;
 char				*path = mt_entry->dev;
 int					nodesInUse;
+u_long				uid,gid;
 
 	LOCK(nfsGlob.lock);
 		nodesInUse = ((Nfs)mt_entry->fs_info)->nodesInUse;
@@ -1894,12 +1927,15 @@ int					nodesInUse;
 		rtems_set_errno_and_return_minus_one(EBUSY);
 	}
 
-	assert( 0 == buildIpAddr(&path,&saddr) );
+	assert( 0 == buildIpAddr(&uid, &gid, 0, &saddr, &path) );
 	
 	stat = mntcall( &saddr,
 					MOUNTPROC_UMNT,
 					xdr_dirpath, &path,
-					xdr_void,	 0 );
+					xdr_void,	 0,
+				    uid,
+				    gid
+				  );
 
 	if (stat) {
 		fprintf(stderr,"NFS UMOUNT -- %s\n", clnt_sperrno(stat));

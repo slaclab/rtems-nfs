@@ -9,6 +9,7 @@
 #include <rpc/rpc.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <stdarg.h>
 
 typedef struct RpcUdpServerRec_ 	*RpcUdpServer;
@@ -16,32 +17,33 @@ typedef struct RpcUdpXactRec_		*RpcUdpXact;
 
 typedef RpcUdpXact					RpcUdpClnt;
 
+#define RPCIOD_DEFAULT_ID	0xdef10000
 
 int
 rpcUdpInit(void);
 
-RpcUdpServer
+enum clnt_stat
 rpcUdpServerCreate(
 	struct sockaddr_in *paddr,
 	int					prog,
 	int					vers,
+	u_long				uid,		/* RPCIO_DEFAULT_ID picks default */
+	u_long				gid,		/* RPCIO_DEFAULT_ID picks default */
+	RpcUdpServer		*pclnt		/* new server is returned here    */
 	);
 
 
 void
 rpcUdpServerDestroy(RpcUdpServer s);
 
-/* NOTE: the timeout value is not used;
- * it exists to make it easy to use
- * this routine as a substitute for
- * clntudp_create()
- */
-RpcUdpClnt
+enum clnt_stat
 rpcUdpClntCreate(
 	struct sockaddr_in	*psaddr,
 	int					prog,
 	int					vers,
-	struct timeval		retry_timeout
+	u_long				uid,		/* RPCIO_DEFAULT_ID picks default */
+	u_long				gid,		/* RPCIO_DEFAULT_ID picks default */
+	RpcUdpClnt			*pclnt		/* new client is returned here    */
 	);
 
 void
@@ -59,7 +61,7 @@ rpcUdpClntCall(
 	CaddrT			pargs,
 	XdrProcT		xres,
 	CaddrT			pres,
-	struct timeval	timeout
+	struct timeval	*timeout	/* optional timeout; maybe NULL to pick default */
 	);
 
 RpcUdpXact
@@ -79,7 +81,7 @@ enum clnt_stat
 rpcUdpSend(
 	RpcUdpXact		xact,
 	RpcUdpServer	srvr,
-	struct timeval	timeout,
+	struct timeval	*timeout,	/* maybe NULL to pick default */
 	u_long			proc,
 	xdrproc_t		xres,
 	caddr_t			pres,
@@ -91,6 +93,23 @@ rpcUdpSend(
 /* wait for a transaction to complete */
 enum clnt_stat
 rpcUdpRcv(RpcUdpXact xact);
+
+/* a yet simpler interface */
+enum clnt_stat
+rpcUdpCallRp(
+	struct sockaddr_in	*pserver_addr,
+	u_long				prog,
+	u_long				vers,
+	u_long				proc,
+	XdrProcT			xargs,
+	CaddrT				pargs,
+	XdrProcT			xres,
+	CaddrT				pres,
+	u_long				uid,		/* RPCIO_DEFAULT_ID picks default */
+	u_long				gid,		/* RPCIO_DEFAULT_ID picks default */
+	struct timeval		*timeout	/* NULL picks default		*/
+);
+
 
 #ifdef __rtems /* pools are implemented by RTEMS message queues */
 

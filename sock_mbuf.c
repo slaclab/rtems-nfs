@@ -68,15 +68,13 @@ send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toad
 	struct mbuf   *to =  0;
 	int           ret = -1;
 
-	memset(&auio, 0, sizeof(auio));
-
 	rtems_bsdnet_semaphore_obtain ();
 	if ((so = rtems_bsdnet_fdToSocket (s)) == NULL) {
 		rtems_bsdnet_semaphore_release ();
 		return -1;
 	}
 
-	error = sockargstombuf (&to, toaddr, tolen);
+	error = sockaddrtombuf (&to, toaddr, tolen);
 	if (error) {
 		errno = error;
 		rtems_bsdnet_semaphore_release ();
@@ -85,13 +83,13 @@ send_mbuf_to (int s, struct mbuf *mb, long len, int flags, struct sockaddr *toad
 
 	error = sosend (so, to, NULL, mb, NULL, flags);
 	if (error) {
-		if (auio.uio_resid != len && (error == EINTR || error == EWOULDBLOCK))
+		if (/*auio.uio_resid != len &&*/ (error == EINTR || error == EWOULDBLOCK))
 			error = 0;
 	}
 	if (error) 
 		errno = error;
 	else
-		ret = len - auio.uio_resid;
+		ret = len /*- auio.uio_resid*/;
 	if (to)
 		m_freem(to);
 	rtems_bsdnet_semaphore_release ();

@@ -79,7 +79,7 @@ my_free(void *p)
 #define DEBUG_ASSERT	(1<<0)
 #define DEBUG_VERB		(1<<1)
 
-#define DEBUG	DEBUG_ASSERT
+#define DEBUG			DEBUG_ASSERT
 
 #define KERNEL
 #include <sys/mbuf.h>
@@ -153,7 +153,7 @@ xdrmbuf_next(XDR *xdrs)
 struct mbuf		*rval;
 MBPrivate		mbp = (MBPrivate)xdrs->x_base;
 
-	if (mbp->current) {
+	if (mbp->mcurrent) {
 		mbp->pos += mbp->mcurrent->m_len;
 		rval      = mbp->mcurrent->m_next;
 	} else {
@@ -271,13 +271,18 @@ union {
 register int  i,j;
 register char *cp,*sp;
 
+	i = xdrs->x_handy - sizeof(int32_t);
+
 	/* handle the most common case first */
-	if ( xdrs->x_handy >= sizeof(int32_t) ) {
+	if ( i >= 0 ) {
+
+		xdrs->x_handy   = i;
+		sp			    = (char*)xdrs->x_private;
+		xdrs->x_private = sp + sizeof(int32_t);
+
 #ifdef CANDO_UNALIGNED
 		{
-			xdrs->x_handy   -= sizeof(int32_t);
-			*lp              = ntohl(*(int32_t *)(xdrs->x_private));
-			xdrs->x_private += sizeof(int32_t);
+			*lp              = ntohl(*(int32_t *)sp);
 #        if DEBUG & DEBUG_VERB
 			fprintf(stderr,"Got unaligned long %x (%i remaining)\n",*lp, xdrs->x_handy);
 #        endif
@@ -285,14 +290,10 @@ register char *cp,*sp;
 		}
 #else   /* machine can't do unaligned access */
 		{
-			sp			    = (char*)xdrs->x_private;
-	
 			u.c[0]          = *sp;
 			u.c[1]          = *++sp;
 			u.c[2]          = *++sp;
 			u.c[3]          = *++sp;
-			xdrs->x_private = (caddr_t) ++sp;
-			xdrs->x_handy  -= sizeof(int32_t);
 
 			goto done;
 		}
@@ -301,14 +302,19 @@ register char *cp,*sp;
 
 	/* here the messy 'crossing buffers' business starts */
 
+
 	j  = sizeof(int32_t);
 
 	cp = u.c-1;
 
+	/* NOTE: on entry to this section,  handy < j holds */
 	do {
 		sp = ((char*)xdrs->x_private)-1;
 
 		if ( (i=xdrs->x_handy) >= j ) {
+			/* more data in the buffer than we need:
+			 * copy everything we need and goto 'done'
+			 */
 			xdrs->x_handy    = i-j;
 			do {
 				*++cp = *++sp;
@@ -318,6 +324,10 @@ register char *cp,*sp;
 			goto done;
 
 		} else {
+			/* not enouth data - copy as much as possible
+			 * then get retrieve the next MBUF and start
+			 * over
+			 */
 			j-=i;
 			while (i--)
 				*++cp = *++sp;
@@ -438,7 +448,7 @@ struct mbuf *m;
 u_int 		rval = 0;
 MBPrivate	mbp  = (MBPrivate)xdrs->x_base;
 
-	for ( m = mbp->mchain; m && m != mbp->mcurrent; m = m->m_next)
+	for ( m = mbp->mchain; m && m != mbp->mcurrent; m = m->m_next )
 		rval += m->m_len;
 	if (m) {
 		rval += (u_long)xdrs->x_private - mtod(m, u_long);
