@@ -854,7 +854,7 @@ enum clnt_stat		stat;
 struct sockaddr_in	saddr;
 char				*path = mt_entry->dev;
 
-	assert( buildIpAddr(&path,&saddr) );
+	assert( 0 == buildIpAddr(&path,&saddr) );
 	
 	stat = mntcall( &saddr,
 					MOUNTPROC_UMNT,
