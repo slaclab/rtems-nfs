@@ -24,6 +24,10 @@
 #include <sys/ioctl.h>
 #include <assert.h>
 #include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "rpcio.h"
 
@@ -226,7 +230,7 @@ static  void   				bufFree(struct mbuf **m);
 extern void 				xdrmbuf_create(XDR *, struct mbuf *, enum xdr_op);
 #else
 typedef RpcBuf				RxBuf;
-#define	bufFree(b)			do { FREE(*(b)); *(b)=0; } while(0)
+#define	bufFree(b)			do { MY_FREE(*(b)); *(b)=0; } while(0)
 #define XID(ibuf) 			((ibuf)->xid)
 #endif
 
@@ -318,7 +322,7 @@ static rtems_interval	ticksPerSec;	/* cached system clock rate (WHO IS ASSUMED N
 /* malloc wrappers for debugging */
 static int nibufs = 0;
 
-static inline void *MALLOC(int s)
+static inline void *MY_MALLOC(int s)
 {
 	if (s) {
 		void *rval;
@@ -331,7 +335,7 @@ static inline void *MALLOC(int s)
 	return 0;
 }
 
-static inline void *CALLOC(int n, int s)
+static inline void *MY_CALLOC(int n, int s)
 {
 	if (s) {
 		void *rval;
@@ -345,7 +349,7 @@ static inline void *CALLOC(int n, int s)
 }
 
 
-static inline void FREE(void *p)
+static inline void MY_FREE(void *p)
 {
 	if (p) {
 		MU_LOCK(hlock);
@@ -355,9 +359,9 @@ static inline void FREE(void *p)
 	}
 }
 #else
-#define MALLOC	malloc
-#define CALLOC  calloc
-#define FREE	free
+#define MY_MALLOC	malloc
+#define MY_CALLOC	calloc
+#define MY_FREE		free
 #endif
 
 static inline bool_t
@@ -482,7 +486,7 @@ struct pmap		pmaparg;
 			return RPC_PROGNOTREGISTERED;
 	} 
 
-	rval       			= (RpcUdpServer)MALLOC(sizeof(*rval));
+	rval       			= (RpcUdpServer)MY_MALLOC(sizeof(*rval));
 	memset(rval, 0, sizeof(*rval));
 
 	if (!inet_ntop(AF_INET, &paddr->sin_addr, rval->name, sizeof(rval->name)))
@@ -513,7 +517,7 @@ rpcUdpServerDestroy(RpcUdpServer s)
 	MU_LOCK(s->authlock);
 	auth_destroy(s->auth);
 	MU_DESTROY(s->authlock);
-	FREE(s);
+	MY_FREE(s);
 }
 
 RpcUdpXact
@@ -532,7 +536,7 @@ register int	i,j;
 	/* word align */
 	size = (size + 3) & ~3;
 
-	rval = (RpcUdpXact)CALLOC(1,sizeof(*rval) - sizeof(rval->obuf) + size);
+	rval = (RpcUdpXact)MY_CALLOC(1,sizeof(*rval) - sizeof(rval->obuf) + size);
 
 	if (rval) {
 	
@@ -544,7 +548,7 @@ register int	i,j;
 		xdrmem_create(&(rval->xdrs), rval->obuf.buf, size, XDR_ENCODE);
 
 		if (!xdr_callhdr(&(rval->xdrs), &header)) {
-			FREE(rval);
+			MY_FREE(rval);
 			return 0;
 		}
 		/* pick a free table slot and initialize the XID */
@@ -571,7 +575,7 @@ register int	i,j;
 		MU_UNLOCK(hlock);
 		if (i==j) {
 			XDR_DESTROY(&rval->xdrs);
-			FREE(rval);
+			MY_FREE(rval);
 			return 0;
 		}
 		rval->obuf.xid  = (rval->obuf.xid << LD_XACT_HASH) | i;
@@ -599,7 +603,7 @@ int i = xact->obuf.xid & XACT_HASH_MSK;
 		bufFree(&xact->ibuf);
 
 		XDR_DESTROY(&xact->xdrs);
-		FREE(xact);
+		MY_FREE(xact);
 }
 
 
@@ -619,7 +623,6 @@ rpcUdpSend(
    )
 {
 register XDR	*xdrs;
-int				len;
 unsigned long	ms;
 va_list			ap;
 
@@ -684,7 +687,6 @@ va_list			ap;
 enum clnt_stat
 rpcUdpRcv(RpcUdpXact xact)
 {
-int					i;
 int					refresh;
 XDR					reply_xdrs;
 struct rpc_msg		reply_msg;
@@ -769,23 +771,6 @@ rtems_event_set		gotEvents;
 	return xact->status.re_status;
 }
 
-/* sent from the socket */
-static enum clnt_stat
-sockSnd(RpcUdpXact xact)
-{
-int len = (int)XDR_GETPOS(&xact->xdrs);
-
-	if ( sendto(ourSock,
-				xact->obuf.buf,
-				len,
-				0,
-				(struct sockaddr*) &xact->server->addr,
-				sizeof(xact->server->addr)) != len ) {
-		xact->status.re_errno = errno;
-		return(xact->status.re_status=RPC_CANTSEND);
-	}
-	return RPC_SUCCESS;
-}
 
 /* On RTEMS, I'm told to avoid select(); this seems to
  * be more efficient
@@ -839,6 +824,26 @@ struct sockwakeup	wkup;
 		}
 	}
 	return 0;
+}
+
+int
+rpcUdpCleanup(void)
+{
+	rtems_semaphore_create(
+			rtems_build_name('R','P','C','f'),
+			0,
+			RTEMS_DEFAULT_ATTRIBUTES,
+			0,
+			&fini);
+	rtems_event_send(rpciod, RPCIOD_KILL_EVENT);
+	/* synchronize with daemon */
+	rtems_semaphore_obtain(fini, RTEMS_WAIT, 5*ticksPerSec);
+	/* if the message queue is still there, something went wrong */
+	if (!msgQ) {
+		rtems_task_delete(rpciod);
+	}
+	rtems_semaphore_delete(fini);
+	return (msgQ !=0);
 }
 
 /* Another API - simpler but less efficient.
@@ -902,10 +907,10 @@ rpcUdpClntCall(
 {
 enum clnt_stat	stat;
 
-		if (stat = rpcUdpSend(xact, xact->server, timeout, proc,
-					xres, pres,
-					xargs, pargs,
-					0)) {
+		if ( (stat = rpcUdpSend(xact, xact->server, timeout, proc,
+								xres, pres,
+								xargs, pargs,
+								0)) ) {
 			fprintf(stderr,"Send failed: %i\n",stat);
 			return stat;
 		}
@@ -929,7 +934,6 @@ rpcUdpCallRp(
 )
 {
 RpcUdpClnt			clp;
-int					retry;
 enum clnt_stat		stat;
 
 	stat = rpcUdpClntCreate(
@@ -969,7 +973,7 @@ nodeXtract(ListNode n)
 static void
 nodeAppend(ListNode l, ListNode n)
 {
-	if (n->next = l->next)
+	if ( (n->next = l->next) )
 		n->next->prev = n;
 	l->next = n;
 	n->prev = l;
@@ -981,11 +985,8 @@ static void
 rpcio_daemon(rtems_task_argument arg)
 {
 rtems_status_code stat;
-enum clnt_stat    rxerr;
 RpcUdpXact        xact;
 RpcUdpServer      srv;
-char              strbuf[20];
-char              *chpt;
 rtems_interval    next_retrans, then, unow;
 long			  now;	/* need to do signed comparison with age! */
 rtems_event_set   events;
@@ -1218,7 +1219,7 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 							}
 							if ( 0 == ++srv->retrans % 1000) {
 								fprintf(stderr,
-										"RPCIO - statistics: already %i retries to server %s\n",
+										"RPCIO - statistics: already %li retries to server %s\n",
 										srv->retrans,
 										srv->name);
 							}
@@ -1330,21 +1331,7 @@ _cexpModuleInitialize(void *mod)
 static int
 _cexpModuleFinalize(void *mod)
 {
-	rtems_semaphore_create(
-			rtems_build_name('R','P','C','f'),
-			0,
-			RTEMS_DEFAULT_ATTRIBUTES,
-			0,
-			&fini);
-	rtems_event_send(rpciod, RPCIOD_KILL_EVENT);
-	/* synchronize with daemon */
-	rtems_semaphore_obtain(fini, RTEMS_WAIT, 5*ticksPerSec);
-	/* if the message queue is still there, something went wrong */
-	if (!msgQ) {
-		rtems_task_delete(rpciod);
-	}
-	rtems_semaphore_delete(fini);
-	return (msgQ !=0);
+	return rpcUdpCleanup();
 }
 
 
@@ -1362,8 +1349,7 @@ rpcUdpXactPoolCreate(
 	int prog, 		int version,
 	int xactsize,	int poolsize)
 {
-int				i;
-RpcUdpXactPool	rval = MALLOC(sizeof(*rval));
+RpcUdpXactPool	rval = MY_MALLOC(sizeof(*rval));
 
 	ASSERT( rval &&
 			RTEMS_SUCCESSFUL == rtems_message_queue_create(
@@ -1387,7 +1373,7 @@ RpcUdpXact xact;
 		rpcUdpXactDestroy(xact);
 	}
 	rtems_message_queue_delete(pool->box);
-	FREE(pool);
+	MY_FREE(pool);
 }
 
 RpcUdpXact
@@ -1437,6 +1423,7 @@ RpcUdpXactPool pool;
  *             the RTEMS/BSDNET headers redefine those :-(
  */
 
+#define KERNEL
 #include <sys/mbuf.h>
 
 ssize_t
@@ -1524,7 +1511,7 @@ RpcUdpXact			xact     = 0;
 				    &fromLen);
 #else
 	if ( !ibuf )
-		ibuf = (RpcBuf)MALLOC(RPCIOD_RXBUFSZ);
+		ibuf = (RpcBuf)MY_MALLOC(RPCIOD_RXBUFSZ);
 	if ( !ibuf )
 		goto cleanup; /* no memory - drop this message */
 
@@ -1551,16 +1538,17 @@ RpcUdpXact			xact     = 0;
 
 		fprintf(stderr,"WARNING sockRcv(): transaction mismatch\n");
 		if (xact) {
-			fprintf(stderr,"xact: xid  0x%08x  -- got 0x%08x\n",
+			fprintf(stderr,"xact: xid  0x%08lx  -- got 0x%08lx\n",
 							xact->obuf.xid, xid);
-			fprintf(stderr,"xact: addr 0x%08x  -- got 0x%08x\n",
+			fprintf(stderr,"xact: addr 0x%08lx  -- got 0x%08lx\n",
 							xact->server->addr.sin_addr.s_addr,
 							fromAddr.sin_addr.s_addr);
 			fprintf(stderr,"xact: port 0x%08x  -- got 0x%08x\n",
 							xact->server->addr.sin_port,
 							fromAddr.sin_port);
 		} else {
-			fprintf(stderr,"got xid 0x%08x but its slot is empty\n",xid);
+			fprintf(stderr,"got xid 0x%08lx but its slot is empty\n",
+							xid);
 		}
 		/* forget about this one and try again */
 		xact = 0;

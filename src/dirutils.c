@@ -1,3 +1,9 @@
+/* $Id$ */
+
+/* very crude and basic fs utilities for testing the NFS */
+
+/* Till Straumann, <strauman@slac.stanford.edu>, 10/2002 */
+
 #ifdef __vxworks
 #include <vxWorks.h>
 #endif
@@ -9,6 +15,10 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdlib.h>
+
+#ifdef HAVE_CEXP
+#include <cexpHelp.h>
+#endif
 
 #define BUFFERSZ 10000
 
@@ -51,7 +61,7 @@ char *t;
 						t = "@"; break;
 	}
 
-	printf("%10i, %10ib, %5i.%-5i 0%04o %s%s\n",
+	printf("%10li, %10lib, %5i.%-5i 0%04o %s%s\n",
 				buf->st_ino,
 				buf->st_size,
 				buf->st_uid,
@@ -98,6 +108,12 @@ cleanup:
 }
 #endif
 
+#if 0
+		fprintf(stderr, "usage: cp(""from"",[""to""[,""-f""]]\n");
+		fprintf(stderr, "          ""to""==NULL -> stdout\n");
+		fprintf(stderr, "          ""-f""       -> overwrite existing file\n");
+#endif
+
 int
 cp(char *from, char *to, char *opts)
 {
@@ -108,6 +124,8 @@ int			rval  = -1;
 int			ffd   = -1;
 int			tfd   = -1;
 int			flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL;
+
+	if (from) {
 
 	if ((ffd=open(from,O_RDONLY,0)) < 0) {
 		fprintf(stderr,
@@ -125,21 +143,31 @@ int			flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL;
 		goto cleanup;
 	}
 
+
 	if (!S_ISREG(st.st_mode)) {
 		fprintf(stderr,"Refuse to copy a non-regular file\n");
 		errno = EINVAL;
 		goto cleanup;
 	}
 
+	} else {
+		ffd        = fileno(stdin);
+		st.st_mode = 0644;
+	}
+
 	if (opts && strchr(opts,'f'))
 		flags &= ~ O_EXCL;
 
-	if ((tfd=open(to,flags,st.st_mode)) < 0) {
-		fprintf(stderr,
-				"Opening %s for writing: %s\n",
-				to,
-				strerror(errno));
-		goto cleanup;
+	if (to) {
+		if ((tfd=open(to,flags,st.st_mode)) < 0) {
+			fprintf(stderr,
+					"Opening %s for writing: %s\n",
+					to,
+					strerror(errno));
+			goto cleanup;
+		}
+	} else {
+		tfd = fileno(stdout);
 	}
 
 	if ( !(buf = malloc(BUFFERSZ)) ) {
@@ -169,10 +197,87 @@ int			flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL;
 cleanup:
 	free(buf);
 
-	if (ffd>=0)
+	if (from && ffd>=0)
 		close(ffd);
-	if (tfd>=0)
+	if (to && tfd>=0)
 		close(tfd);
 
 	return rval;
 }
+
+int
+ln(char *to, char *name, char *opts)
+{
+	if (!to) {
+		fprintf(stderr,"ln: need 'to' argument\n");
+		return -1;
+	}
+	if (!name) {
+		if ( !(name = strrchr(to,'/')) ) {
+			fprintf(stderr,
+					"ln: 'unable to link %s to %s\n",
+					to,to);
+			return -1;
+		}
+		name++;
+	}
+	if (opts || strchr(opts,'s')) {
+		if (symlink(name,to)) {
+			fprintf(stderr,"symlink: %s\n",strerror(errno));
+			return -1;
+		}
+	} else {
+		if (link(name,to)) {
+			fprintf(stderr,"hardlink: %s\n",strerror(errno));
+			return -1;
+		}
+	}
+	return 0;
+}
+
+int
+rm(char *path)
+{
+	return unlink(path);
+}
+
+int
+cd(char *path)
+{
+	return chdir(path);
+}
+
+#ifdef HAVE_CEXP
+static CexpHelpTabRec _cexpHelpTabDirutils[]={
+	HELP(
+"copy a file: cp(""from"",[""to""[,""-f""]])\n\
+                 from = NULL <-- stdin\n\
+                 to   = NULL --> stdout\n\
+                 option -f: overwrite existing file\n",
+		int,
+		cp, (char *from, char *to, char *options)
+		),
+	HELP(
+"list a directory: ls([""dir""])\n",
+		int,
+		ls, (char *dir)
+		),
+	HELP(
+"remove a file\n",
+		int,
+		rm, (char *path)
+		),
+	HELP(
+"change the working directory\n",
+		int,
+		cd, (char *path)
+		),
+	HELP(
+"create a link: ln(""to"",""name"",""[-s]""\n\
+                   -s creates a symlink\n",
+		int,
+		ln, (char *to, char *name, char *options)
+		),
+	HELP("",,0,)
+};
+#endif

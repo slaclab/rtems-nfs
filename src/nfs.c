@@ -18,6 +18,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <netdb.h>
+#include <ctype.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 
 #include <nfs_prot.h>
@@ -257,8 +260,6 @@ static bool_t
 xdr_dir_info(XDR *xdrs, DirInfo di)
 {
 DirInfo	dip;
-int		good,decoded;
-int		remaining;
 
 	if ( !xdr_nfsstat(xdrs, &di->status) )
 		return FALSE;
@@ -373,8 +374,6 @@ typedef struct serporid {
 static bool_t
 xdr_serporidok(XDR *xdrs, serporidok *objp)
 {
-    register int32_t *buf;
-    
      if (!xdr_nfs_fh (xdrs, &objp->file))
          return FALSE;
      if (!xdr_fattr (xdrs, &objp->attributes))
@@ -385,8 +384,6 @@ xdr_serporidok(XDR *xdrs, serporidok *objp)
 static bool_t
 xdr_serporid(XDR *xdrs, serporid *objp)
 {
-    register int32_t *buf;
-
      if (!xdr_nfsstat (xdrs, &objp->status))
          return FALSE;
     switch (objp->status) {
@@ -502,12 +499,6 @@ typedef struct NfsNodeRec_ {
 /*****************************************
 	Forward Declarations
  *****************************************/
-
-static int nfs_do_eval_link(
-	rtems_filesystem_location_info_t *pathloc,
-	void                              *arg,
-	int								  forMake
-);
 
 static int nfs_readlink(
 	rtems_filesystem_location_info_t  *loc,     	/* IN  */       
@@ -934,7 +925,7 @@ int			refuse;
 Nfs			nfs;
 
 	LOCK(nfsGlob.lock);
-	if (refuse = nfsGlob.num_mounted_fs) {
+	if ( (refuse = nfsGlob.num_mounted_fs) ) {
 		fprintf(stderr,"Refuse to unload NFS; %i filesystems still mounted:\n",
 						refuse);
 		for (nfs = nfsGlob.mounted_fs; nfs; nfs=nfs->next)
@@ -964,6 +955,7 @@ _cexpModuleInitialize(void *mod)
 {	
 	nfsInit(0,0);
 }
+
 
 static int
 _cexpModuleFinalize(void *mod)
@@ -1129,7 +1121,7 @@ int		len;
 
 	/* look for the optional uid/gid */
 	if ( (chpt = strchr(chpt, UIDSEP)) ) {
-		if ( 2 != sscanf(*pPath,"%i.%i",puid,pgid) ) {
+		if ( 2 != sscanf(*pPath,"%li.%li",puid,pgid) ) {
 			errno = EINVAL;
 			return -1;
 		}
@@ -1191,8 +1183,9 @@ mntcall(
 	u_long				uid,
 	u_long				gid)
 {
-RpcUdpClnt			clp;
+#ifdef MOUNT_V1_PORT
 int					retry;
+#endif
 enum clnt_stat		stat = RPC_FAILED;
 
 #ifdef MOUNT_V1_PORT
@@ -1751,7 +1744,9 @@ struct sockaddr_in	saddr;
 enum clnt_stat		stat;
 fhstatus			fhstat;
 u_long				uid,gid;
+#ifdef NFS_V2_PORT
 int					retry;
+#endif
 Nfs					nfs       = 0;
 NfsNode				rootNode  = 0;
 RpcUdpServer		nfsServer = 0;
@@ -2465,7 +2460,6 @@ static int nfs_dir_read(
 	unsigned32     count
 )
 {
-int				i;
 DirInfo			di     = iop->file_info;
 RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 
@@ -2525,7 +2519,6 @@ static int nfs_file_write(
 	unsigned32    count
 )
 {
-attrstat	wr;
 NfsNode 	node = iop->pathinfo.node_access;
 Nfs			nfs  = node->nfs;
 int			e;
@@ -2836,7 +2829,6 @@ static int nfs_file_ftruncate(
 	off_t          length
 )
 {
-rtems_clock_time_value	now;
 sattr					arg;
 
 	arg.size = length;
@@ -3003,7 +2995,7 @@ nfsMount(char *uidhost, char *path, char *mntpoint)
 rtems_filesystem_mount_table_entry_t	*mtab;
 struct stat								st;
 int										devl;
-char									*host, *dst;
+char									*host;
 int										rval = -1;
 char									*dev =  0;
 
