@@ -907,7 +907,8 @@ struct sockwakeup	wkup;
 											RPCIOD_PRIO,
 											RPCIOD_STACK,
 											RTEMS_DEFAULT_MODES,
-											RTEMS_DEFAULT_ATTRIBUTES,
+											/* fprintf saves/restores FP registers :-( */
+											RTEMS_DEFAULT_ATTRIBUTES | RTEMS_FLOATING_POINT,
 											&rpciod) );
 			wkup.sw_pfn = rxWakeupCB;
 			wkup.sw_arg = (caddr_t)rpciod;
