@@ -6,8 +6,12 @@
  *
  *    RTEMS/libnetworking LICENSING restrictions may apply
  *
- *    Author (modifications only)
- *    		Till Straumann, <strauman@slac.stanford.edu>, 2002
+ *    Author (modifications only):
+ *    Copyright: 2002, Stanford University and
+ *    		 Till Straumann, <strauman@slac.stanford.edu>
+ *    Licensing: EPICS open license; consult the 'LICENSE' file
+ *               or http://www.aps.anl.gov/epics/license/open.php
+ *               for more information.
  */
 
 #include <string.h>

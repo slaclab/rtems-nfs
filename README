@@ -1,0 +1,292 @@
+RTEMS-NFS
+=========
+
+A NFS-V2 client implementation for the RTEMS real-time
+executive.
+
+Author: Till Straumann <strauman@slac.stanford.edu>, 2002
+
+I  Overview
+-----------
+
+This package implements a simple non-caching NFS client
+for RTEMS. Most of the system calls are supported
+with the exception of 'mount', i.e. it is not possible
+to mount another FS on top of NFS (mostly because
+of the difficulty that arises when mount points are
+deleted on the server). It shouldn't be hard to do,
+though.
+
+Note: this client supports NFS vers. 2 / MOUNT vers. 1;
+      NFS Version 3 or higher are NOT supported.
+
+NFS consists of two packages: RPCIOD and NFS itself.
+
+ - RPCIOD is a UDP/RPC multiplexor daemon. It takes
+   RPC requests from multiple local client threads,
+   funnels them through a single socket to multiple
+   servers and dispatches the replies back to the
+   (blocked) requestor threads.
+   RPCIOD does packet retransmission and handles
+   timeouts etc.
+   Note however, that it does NOT do any XDR
+   marshalling - it is up to the requestor threads
+   to do the XDR encoding/decoding.
+
+ - The NFS package maps RTEMS filesystem calls
+   to proper RPCs, it does the XDR work and
+   hands the RPC requests to RPCIOD blocking
+   for a reply or a timeout.
+
+Performance
+- - - - - -
+
+Performance sucks (due to the lack of readahead/delayed
+write and caching). On a fast (100Mb/s) ethernet, it
+takes about 20s to copy a 10MB file from NFS to NFS.
+I found, however, that vxWorks' NFS client doesn't seem
+to be any faster...
+
+II Usage
+---------
+
+After linking into the system and proper initialization
+(rtems-NFS supports 'magic' module initialization when
+loaded into a running system with the CEXP loader),
+you are ready for mounting NFSes from a server
+(I avoid the term NFS filesystem because NFS already
+stands for 'Network File System').
+
+1) Initialization.
+- - - - - - - - - -
+NFS consists of two modules who must be initialized:
+
+ a) the RPCIO daemon package; by calling
+
+      rpcUdpInit();
+
+    note that this step must be performed before
+    initializing NFS:
+
+ b) NFS is initialized by calling
+
+      nfsInit( smallPoolDepth, bigPoolDepth );
+
+    if you supply 0 (zero) values for the pool
+    depths, the compile-time default configuration
+    is used which should work fine.
+
+NOTE: when using the CEXP to load these modules
+into a running system, initialization will be
+performed automagically.
+
+2) Mounting Remote Server Filesystems
+- - - - - - - - - - - - - - - - - - -
+
+There are two interfaces for mounting an NFS:
+
+ - The (non-POSIX) RTEMS 'mount()' call:
+
+     mount( &mount_table_entry_pointer,
+            &filesystem_operations_table_pointer,
+            options,
+            device,
+            mount_point )
+
+    Note that you must specify a 'mount_table_entry_pointer'
+    RTEMS' mount() doesn't grok a NULL for the first argument.
+
+     o for the 'filesystem_operations_table_pointer', supply
+
+         &nfs_fs_ops
+   
+     o options are constants (see RTEMS headers) for specifying
+       read-only / read-write mounts.
+
+     o the 'device' string specifies the remote filesystem
+       who shall be mounted. NFS expects a string of the
+       format (EBNF syntax):
+
+         [ <uid> '.' <gid> '@' ] <hostip> ':' <path>
+
+       The first optional part of the string allows you
+       to specify the credentials to be used for all
+       subsequent transactions with this server. If the
+       string is omitted, the EUID/EGID of the executing
+       thread (i.e. the thread performing the 'mount' - 
+       NFS will still 'remember' these values and use them
+       for all communication with this server).
+       
+       The <hostip> part denotes the server IP address
+       in standard 'dot' notation. It is followed by
+       a colon and the (absolute) path on the server.
+       Note that no extra characters or whitespace must
+       be present in the string. An example 'device'
+       string is:
+
+         "300.99@192.168.44.3:/remote/rtems/root"
+
+    o the 'mount_point' string identifies the local
+      directory (most probably on IMFS) where the NFS
+      is to be mounted. Note that the mount point must
+      already exist with proper permissions.
+
+ - Alternate 'mount' interface. NFS offers a more
+   convenient wrapper requiring three string arguments:
+
+	nfsMount(uidgid_at_host, server_path, mount_point)
+
+   This interface does DNS lookup (see reentrancy note
+   below) and creates the mount point if necessary.
+   
+   o the first argument specifies the server and
+     optionally the uid/gid to be used for authentication.
+     The semantics are exactly as described above:
+
+       [ <uid> '.' <gid> '@' ] <host>
+     
+     The <host> part may be either a host _name_ or
+     an IP address in 'dot' notation. In the former
+     case, nfsMount() uses 'gethostbyname()' to do
+     a DNS lookup.
+
+     IMPORTANT NOTE: gethostbyname() is NOT reentrant
+     and 'nfsMount()' (if not provided with an IP/dot
+     address string) is hence subject to race conditions.
+ 
+   o the 'server_path' and 'mount_point' arguments
+     are described above.
+     NOTE: If the mount point does not exist yet,
+           nfsMount() tries to create it.
+
+3) Unmounting
+- - - - - - -
+An NFS can be unmounted using RTEMS 'unmount()'
+call (yep, it is unmount() - not umount()):
+
+  unmount(mount_point)
+
+Note that you _must_ supply the mount point (string
+argument). It is _not_ possible to specify the
+'mountee' when unmounting. NFS implements no
+convenience wrapper for this (yet), essentially because
+(although this sounds unbelievable) it is non-trivial
+to lookup the path leading to an RTEMS filesystem
+directory node.
+
+4) Unloading
+- - - - - - -
+After unmounting all NFS from the system, the NFS
+and RPCIOD modules may be stopped and unloaded.
+Just call 'nfsCleanup()' and 'rpcUdpCleanup()'
+in this order. You should evaluate the return value
+of these routines which is non-zero if either
+of them refuses to yield (e.g. because there are
+still mounted filesystems).
+Again, when unloading is done by CEXP this is
+transparently handled.
+
+III Implementation Details
+--------------------------
+
+1) RPCIOD
+- - - - -
+
+RPCIOD was created to
+
+a) avoid non-reentrant librpc calls.
+b) support 'asynchronous' operation over a single
+   socket.
+
+RPCIOD is a daemon thread handling 'transaction objects'
+(XACTs) through an UDP socket.  XACTs are marshalled RPC
+calls/replies associated with RPC servers.
+
+requestor thread:                 network:
+
+       XACT                        packet  
+        |                            |
+        V                            V
+  | message queue |              ( socket )
+        |                            |  ^
+        ---------->          <-----  |  |
+                     RPCIOD             |
+                   /       --------------
+           timeout/         (re) transmission
+                         
+
+A requestor thread drops a transaction into 
+the message queue and goes to sleep.  The XACT is
+picked up by rpciod who is listening for events from
+three sources:
+
+  o the request queue
+  o packet arrival at the socket
+  o timeouts
+
+RPCIOD sends the XACT to its associated server and
+enqueues the pending XACT into an ordered list of
+outstanding transactions.
+
+When a packet arrives, RPCIOD (based on the RPC transaction
+ID) looks up the matching XACT and wakes up the requestor.
+
+When a timeout expires, RPCIOD examines the outstanding
+XACT that is responsible for the timeout. If its lifetime
+has not expired yet, RPCIOD resends the request. Otherwise,
+the XACT's error status is set and requestor is woken up.
+
+RPCIOD dynamically adjusts the retransmission intervals
+based on the average round-trip time measured (on a per-server
+basis).
+
+Having the requestors event driven (rather than blocking
+e.g. on a semaphore) is geared to having many different
+requestors (one synchronization object per requestor would
+be needed otherwise).
+
+Requestors who want to do asynchronous IO need a different
+interface which will be added in the future.
+
+1.a) Reentrancy
+- - - - - - - - 
+RPCIOD does no non-reentrant librpc calls.
+
+1.b) Efficiency
+- - - - - - - - 
+We shouldn't bother about efficiency until pipelining (read-ahead/
+delayed write) and caching are implemented. The round-trip delay
+associated with every single RPC transaction clearly is the big
+performance killer.
+
+Nevertheless, I could not withstand the temptation to eliminate
+the extra copy step involved with socket IO:
+
+A user data object has to be XDR encoded into a buffer. The 
+buffer given to the socket where it is copied into MBUFs.
+(The network chip driver might even do more copying).
+
+Likewise, on reception 'recvfrom' copies MBUFS into a user
+buffer which is XDR decoded into the final user data object.
+
+Eliminating the copy into (possibly multiple) MBUFS by
+'sendto()' is actually a piece of cake. RPCIOD uses the
+'sosend()' routine [properly wrapped] supplying a single
+MBUF header who directly points to the marshalled buffer
+:-)
+
+Getting rid of the extra copy on reception was (only a little)
+harder: I derived a 'XDR-mbuf' stream from SUN's xdr_mem which
+allows for XDR-decoding out of a MBUF chain obtained by
+soreceive().
+
+2) NFS
+- - - -
+The actual NFS implementation is straightforward and essentially
+'passive' (no threads created). Any RTEMS task executing a
+filesystem call dispatched to NFS (such as 'opendir()', 'lseek()'
+or 'unlink()') ends up XDR encoding arguments, dropping a
+XACT into RPCIOD's message queue and going to sleep.
+When woken up by RPCIOD, the XACT is decoded (using the XDR-mbuf
+stream mentioned above) and the properly cooked-up results are
+returned.
