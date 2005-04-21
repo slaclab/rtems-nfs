@@ -1,4 +1,4 @@
-/* nfs.c,v 1.33 2004/09/22 22:10:41 till Exp */
+/* $Id nfs.c,v 1.33 2004/09/22 22:10:41 till Exp$ */
 
 /* NFS client implementation for RTEMS; hooks into the RTEMS filesystem */
 
@@ -928,8 +928,8 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
 entry	dummy;
 
-	fprintf(stderr,"This is RTEMS-NFS Release SSRL_RTEMS_20041202\n");
-	fprintf(stderr,"(nfs.c,v 1.33 2004/09/22 22:10:41 till Exp)\n\n");
+	fprintf(stderr,"This is RTEMS-NFS $Name$\n");
+	fprintf(stderr,"($Id$)\n\n");
 	fprintf(stderr,"Till Straumann, Stanford/SLAC/SSRL 2002\n");
 	fprintf(stderr,"See LICENSE file for licensing info\n");
 
