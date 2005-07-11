@@ -1,0 +1,25 @@
+
+Eric Norum reported compilation problems on 4.7.
+rtemsNFS has not been ported to 4.7 yet.
+
+Eric was able to compile and run rtemsNFS, however. YMMV
+He used this patch
+
+diff -ur ssrlApps.orig/rtemsNfs/src/Makefile ssrlApps/rtemsNfs/src/Makefile
+--- ssrlApps.orig/rtemsNfs/src/Makefile 2004-05-28 06:38:20.000000000 -0500
++++ ssrlApps/rtemsNfs/src/Makefile      2005-07-11 14:32:36.000000000 -0500
+@@ -50,7 +50,7 @@
+
+ DEFS_CEXP_YES=-DHAVE_CEXP
+
+-DEFINES  += $(DEFS_CEXP_$(HAVE_CEXP))
++DEFINES  += $(DEFS_CEXP_$(HAVE_CEXP)) -D_KERNEL -D'__P(x)=x'
+
+ CPPFLAGS += -I. -I../proto
+
+and ignored a bunch of warnings.
+As soon as I have a 4.7 toolchain installed I'll clean this up.
+Stay tuned.
+
+T.S, 2005/7/11
+
