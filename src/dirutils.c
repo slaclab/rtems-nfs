@@ -288,7 +288,7 @@ cd(char *path)
 }
 
 #ifdef HAVE_CEXP
-static CexpHelpTabRec _cexpHelpTabDirutils[]={
+static CexpHelpTabRec _cexpHelpTabDirutils[] __attribute__((unused)) = {
 	HELP(
 "copy a file: cp(""from"",[""to""[,""-f""]])\n\
                  from = NULL <-- stdin\n\
