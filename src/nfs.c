@@ -2613,8 +2613,16 @@ int			e;
 	if (count > NFS_MAXDATA)
 		count = NFS_MAXDATA;
 
+
 	SERP_ARGS(node).writearg.beginoffset   = 0xdeadbeef;
-	SERP_ARGS(node).writearg.offset	  	   = iop->offset;
+	if ( LIBIO_FLAGS_APPEND & iop->flags ) {
+		if ( updateAttr(node, 0) ) {
+			return -1;
+		}
+		SERP_ARGS(node).writearg.offset	  	   = SERP_ATTR(node).size;
+	} else {
+		SERP_ARGS(node).writearg.offset	  	   = iop->offset;
+	}
 	SERP_ARGS(node).writearg.totalcount	   = 0xdeadbeef;
 	SERP_ARGS(node).writearg.data.data_len = count;
 	SERP_ARGS(node).writearg.data.data_val = (void*)buffer;
@@ -2671,6 +2679,21 @@ static int nfs_file_lseek(
 			length,
 			whence);
 #endif
+	if ( SEEK_END == whence ) {
+		/* rtems (4.6.2) libcsupport code 'lseek' uses iop->size to
+		 * compute the offset. We don't want to track the file size
+	 	 * by updating 'iop->size' constantly.
+		 * Since lseek is the only place using iop->size, we work
+		 * around this by tweaking the offset here...
+		 */
+		NfsNode	node = iop->pathinfo.node_access;
+		fattr	*fa  = &SERP_ATTR(node);
+
+		if (updateAttr(node, 0 /* only if old */)) {
+			return -1;
+		}
+		iop->offset = fa->size;
+	}
 
 	/* this is particularly easy :-) */
 	return iop->offset;

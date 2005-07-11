@@ -1,3 +1,14 @@
+Changes since RTEMS-NFS 1.2:
+ NFS:
+ - lseek(SEEK_END) didn't work. The underlying RTEMS filesystem code
+   uses an internal file 'size' field to compute the offset whence SEEK_END.
+   Instead of painfully maintaining 'size' across all system calls, we
+   just tweak the offset for SEEK_END and leave 'size' unused.
+ - fix: O_APPEND wasn't honoured. Note that there is no NFS 'append' call - 
+   the client simply uses the currently available idea of the file size
+   to set the write offset. This obviously is subject to race conditions
+   if multiple clients are writing the same file.
+
 Changes since RTEMS-NFS 1.1:
  NFS:
  - unlink() didnt work. The underlying RTEMS filesystem code evaluates
