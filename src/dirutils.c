@@ -216,7 +216,7 @@ int			flags = O_CREAT | O_WRONLY | O_TRUNC | O_EXCL;
 					strerror(errno));
 			goto cleanup;
 		}
-		if ( !(tst=fdopen(fd, "")) ) {
+		if ( !(tst=fdopen(fd, "w")) ) {
 			fprintf(stderr,
 					"Opening output stream [fdopen()] failed: %s\n",
 					strerror(errno));
