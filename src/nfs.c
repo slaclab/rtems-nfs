@@ -2860,24 +2860,26 @@ u_int					mode;
 	if (mask & SATTR_MODE) {
 		mode &= S_IFMT;
 		mode |= arg->mode & ~S_IFMT;
+	} else {
+		mode = -1;
 	}
 	SERP_ARGS(node).sattrarg.attributes.mode  = mode;
 
 	SERP_ARGS(node).sattrarg.attributes.uid	  =
-		(mask & SATTR_UID)  ? arg->uid : SERP_ATTR(node).uid;
+		(mask & SATTR_UID)  ? arg->uid : -1;
 
 	SERP_ARGS(node).sattrarg.attributes.gid	  =
-		(mask & SATTR_GID)  ? arg->gid : SERP_ATTR(node).gid;
+		(mask & SATTR_GID)  ? arg->gid : -1;
 
 	SERP_ARGS(node).sattrarg.attributes.size  =
-		(mask & SATTR_SIZE) ? arg->size : SERP_ATTR(node).size;
+		(mask & SATTR_SIZE) ? arg->size : -1;
 
 	if (mask & SATTR_ATIME)
 		t = arg->atime;
 	else if (mask & SATTR_TOUCHA)
 		t = nfsnow;
 	else
-		t = SERP_ATTR(node).atime;
+		t.seconds = t.useconds = -1;
 	SERP_ARGS(node).sattrarg.attributes.atime = t;
 
 	if (mask & SATTR_ATIME)
@@ -2885,7 +2887,7 @@ u_int					mode;
 	else if (mask & SATTR_TOUCHA)
 		t = nfsnow;
 	else
-		t = SERP_ATTR(node).mtime;
+		t.seconds = t.useconds = -1;
 	SERP_ARGS(node).sattrarg.attributes.mtime = t;
 
 	node->serporid.status = NFS_OK;
@@ -2942,9 +2944,13 @@ static int nfs_file_ftruncate(
 sattr					arg;
 
 	arg.size = length;
+	/* must not modify any other attribute; if we are not the owner
+	 * of the file or directory but only have write access changing
+	 * any attribute besides 'size' will fail...
+	 */
 	return nfs_sattr(iop->pathinfo.node_access,
 					 &arg,
-					 SATTR_SIZE | SATTR_TOUCH);
+					 SATTR_SIZE);
 }
 
 #define nfs_dir_ftruncate 0
