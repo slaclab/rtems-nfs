@@ -1,5 +1,12 @@
 Changes since RTEMS-NFS 1.2:
  NFS:
+ - ftruncate didn't work. The functionality is achieved by nfs_sattr()
+   setting the file size to 0. However, nfs_sattr() always tried to set
+   all attributes (re-applying the current values to fields we didn't
+   want to change) which failed (EPERM) if we were not the owner.
+   Now, we restrict modifications to the requested fields (in case of
+   ftruncate this is *only* the size), adhering to rfc1094 (which states
+   that unused fields shall be set to -1).
  - lseek(SEEK_END) didn't work. The underlying RTEMS filesystem code
    uses an internal file 'size' field to compute the offset whence SEEK_END.
    Instead of painfully maintaining 'size' across all system calls, we
