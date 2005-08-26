@@ -8,6 +8,11 @@ Changes since RTEMS-NFS 1.2:
    the client simply uses the currently available idea of the file size
    to set the write offset. This obviously is subject to race conditions
    if multiple clients are writing the same file.
+ dirutils:
+ - replaced read/write calls by stdio; In case of copying to stdout, I
+   experienced occasional crashes when write(fileno(stdout),...) -- according
+   to the standard, mixing low-level i/o with stdio might produce undefined
+   results; there we go...
 
 Changes since RTEMS-NFS 1.1:
  NFS:
