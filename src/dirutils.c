@@ -269,8 +269,11 @@ cleanup:
 	if ( tst ) {
 		if ( to )
 			fclose(tst);
-		else
+		else {
+			/* flush stdout */
+			fflush(tst);
 			clearerr(tst);
+		}
 	}
 
 	return rval;
