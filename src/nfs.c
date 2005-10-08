@@ -1,4 +1,4 @@
-/* $Id nfs.c,v 1.33 2004/09/22 22:10:41 till Exp$ */
+/* $Id$ */
 
 /* NFS client implementation for RTEMS; hooks into the RTEMS filesystem */
 
@@ -173,7 +173,8 @@ static struct timeval _nfscalltimeout = { 10, 0 };	/* {secs, us } */
                             RTEMS_INHERIT_PRIORITY |   \
                             RTEMS_BINARY_SEMAPHORE)
 
-#define LOCK(s)		do { rtems_semaphore_obtain((s),   \
+#define LOCK(s)		do {                               \
+						rtems_semaphore_obtain((s),    \
 									RTEMS_WAIT,        \
 									RTEMS_NO_TIMEOUT); \
 					} while (0) 
@@ -818,6 +819,7 @@ static NfsNode
 nfsNodeCreate(Nfs nfs, nfs_fh *fh)
 {
 NfsNode	rval = malloc(sizeof(*rval));
+unsigned long flags;
 
 #if DEBUG & DEBUG_TRACK_NODES
 	fprintf(stderr,"NFS: creating a node\n");
@@ -826,11 +828,11 @@ NfsNode	rval = malloc(sizeof(*rval));
 	if (rval) {
 		if (fh)
 			memcpy( &SERP_FILE(rval), fh, sizeof(*fh) );
+		rtems_interrupt_disable(flags);
+			nfs->nodesInUse++;
+		rtems_interrupt_enable(flags);
 		rval->nfs       = nfs;
 		rval->str		= 0;
-		LOCK(nfsGlob.lock);
-		nfs->nodesInUse++;
-		UNLOCK(nfsGlob.lock);
 	} else {
 		errno = ENOMEM;
 	}
@@ -842,6 +844,8 @@ NfsNode	rval = malloc(sizeof(*rval));
 static void
 nfsNodeDestroy(NfsNode node)
 {
+unsigned long flags;
+
 #if DEBUG & DEBUG_TRACK_NODES
 	fprintf(stderr,"NFS: destroying a node\n");
 #endif
@@ -852,13 +856,13 @@ nfsNodeDestroy(NfsNode node)
   	xdr_free(xdr_serporid, &node->serporid);
 #endif
 
-	LOCK(nfsGlob.lock);
-	node->nfs->nodesInUse--;
+	rtems_interrupt_disable(flags);
+		node->nfs->nodesInUse--;
 #if DEBUG & DEBUG_COUNT_NODES
-	if (node->str)
-		node->nfs->stringsInUse--;
+		if (node->str)
+			node->nfs->stringsInUse--;
 #endif
-	UNLOCK(nfsGlob.lock);
+	rtems_interrupt_enable(flags);
 
 	if (node->str)
 		free(node->str);
@@ -897,9 +901,11 @@ NfsNode rval = nfsNodeCreate(node->nfs, 0);
 				return 0;
 			}
 #if DEBUG & DEBUG_COUNT_NODES
-			LOCK(nfsGlob.lock);
+			{ unsigned long flags;
+			rtems_interrupt_disable(flags);
 				node->nfs->stringsInUse++;
-			UNLOCK(nfsGlob.lock);
+			rtems_interrupt_enable(flags);
+			}
 #endif
 		}
 
@@ -928,7 +934,7 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
 entry	dummy;
 
-	fprintf(stderr,"This is RTEMS-NFS $Name$\n");
+	fprintf(stderr,"This is RTEMS-NFS Release $Name$\n");
 	fprintf(stderr,"($Id$)\n\n");
 	fprintf(stderr,"Till Straumann, Stanford/SLAC/SSRL 2002\n");
 	fprintf(stderr,"See LICENSE file for licensing info\n");
@@ -1333,6 +1339,7 @@ NfsNode			node   = pathloc->node_access;
 char			*p     = malloc(MAXPATHLEN+1);
 Nfs				nfs    = (Nfs)pathloc->mt_entry->fs_info;
 RpcUdpServer	server = nfs->server;
+unsigned long	flags;
 
 	if ( !p ) {
 		e = ENOMEM;
@@ -1340,8 +1347,16 @@ RpcUdpServer	server = nfs->server;
 	}
 	strcpy(p, pathname);
 
+	LOCK(nfsGlob.lock);
+	node = nfsNodeClone(node);
+	UNLOCK(nfsGlob.lock);
+
+	/* from here on, the NFS is protected from being unmounted
+	 * since the node refcount is > 1
+	 */
+	
 	/* clone the node */
-	if ( !(node = nfsNodeClone(node)) ) {
+	if ( !node ) {
 		/* nodeClone sets errno */
 		goto cleanup;
 	}
@@ -1538,9 +1553,9 @@ RpcUdpServer	server = nfs->server;
 		/* increment the 'in use' counter since we return one more
 		 * reference to the root node
 		 */
-		LOCK(nfsGlob.lock);
+		rtems_interrupt_disable(flags);
 			nfs->nodesInUse++;
-		UNLOCK(nfsGlob.lock);
+		rtems_interrupt_enable(flags);
 		nfsNodeDestroy(node);
 
 
@@ -1558,9 +1573,9 @@ RpcUdpServer	server = nfs->server;
 		if (node->args.name) {
 			if (node->str) {
 #if DEBUG & DEBUG_COUNT_NODES
-				LOCK(nfsGlob.lock);
+				rtems_interrupt_disable(flags);
 					nfs->stringsInUse--;
-				UNLOCK(nfsGlob.lock);
+				rtems_interrupt_enable(flags);
 #endif
 				free(node->str);
 			}
@@ -1571,9 +1586,9 @@ RpcUdpServer	server = nfs->server;
 			}
 
 #if DEBUG & DEBUG_COUNT_NODES
-			LOCK(nfsGlob.lock);
+			rtems_interrupt_disable(flags);
 				nfs->stringsInUse++;
-			UNLOCK(nfsGlob.lock);
+			rtems_interrupt_enable(flags);
 #endif
 		}
 
@@ -1589,6 +1604,7 @@ cleanup:
 		pathloc->node_access = 0;
 	}
 #if DEBUG & DEBUG_COUNT_NODES
+	/* slightly unsafe; nfs could be unmounted/destroyed by other thread at this point */
 	fprintf(stderr,
 			"leaving evalpath, in use count is %i nodes, %i strings\n",
 			nfs->nodesInUse, nfs->stringsInUse);
@@ -1739,26 +1755,31 @@ static int nfs_freenode(
 {
 Nfs	nfs    = ((NfsNode)pathloc->node_access)->nfs;
 
+#if DEBUG & DEBUG_COUNT_NODES
+	/* print counts at entry where they are > 0 so 'nfs' is safe from being destroyed 
+	 * and there's no race condition
+	 */
+	fprintf(stderr,
+			"entering freenode, in use count is %i nodes, %i strings\n",
+			nfs->nodesInUse,
+			nfs->stringsInUse);
+#endif
+
 	/* never destroy the root node; it is released by the unmount
 	 * code
 	 */
 	if (locIsRoot(pathloc)) {
+		unsigned long flags;
 		/* just adjust the references to the root node but
 		 * don't really release it
 		 */
-		LOCK(nfsGlob.lock);
+		rtems_interrupt_disable(flags);
 			nfs->nodesInUse--;
-		UNLOCK(nfsGlob.lock);
+		rtems_interrupt_enable(flags);
 	} else {
 		nfsNodeDestroy(pathloc->node_access);
 		pathloc->node_access = 0;
 	}
-#if DEBUG & DEBUG_COUNT_NODES
-	fprintf(stderr,
-			"leaving freenode, in use count is %i nodes, %i strings\n",
-			nfs->nodesInUse,
-			nfs->stringsInUse);
-#endif
 	return 0;
 }
 
@@ -1975,11 +1996,11 @@ char				*path = mt_entry->dev;
 int					nodesInUse;
 u_long				uid,gid;
 
-	LOCK(nfsGlob.lock);
-		nodesInUse = ((Nfs)mt_entry->fs_info)->nodesInUse;
-	UNLOCK(nfsGlob.lock);
+LOCK(nfsGlob.llock);
+	nodesInUse = ((Nfs)mt_entry->fs_info)->nodesInUse;
 
 	if (nodesInUse > 1 /* one ref to the root node used by us */) {
+		UNLOCK(nfsGlob.llock);
 		fprintf(stderr,
 				"Refuse to unmount; there are still %i nodes in use (1 used by us)\n",
 				nodesInUse);
@@ -1997,6 +2018,7 @@ u_long				uid,gid;
 				  );
 
 	if (stat) {
+		UNLOCK(nfsGlob.llock);
 		fprintf(stderr,"NFS UMOUNT -- %s\n", clnt_sperrno(stat));
 		errno = EIO;
 		return -1;
@@ -2008,9 +2030,8 @@ u_long				uid,gid;
 	nfsDestroy(mt_entry->fs_info);
 	mt_entry->fs_info = 0;
 
-	LOCK(nfsGlob.llock);
-		nfsGlob.num_mounted_fs--;
-	UNLOCK(nfsGlob.llock);
+	nfsGlob.num_mounted_fs--;
+UNLOCK(nfsGlob.llock);
 
 	return 0;
 }
