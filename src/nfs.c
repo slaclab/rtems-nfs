@@ -324,7 +324,7 @@ DirInfo	dip;
 		/* we pass a 0 size - size is unused since
 		 * we always pass a non-NULL pointer
 		 */
-		if ( !xdr_pointer(xdrs, (caddr_t*)&dip, 0 /* size */, xdr_dir_info_entry) )
+		if ( !xdr_pointer(xdrs, (void*)&dip, 0 /* size */, (xdrproc_t)xdr_dir_info_entry) )
 			return FALSE;
 	}
 
@@ -487,12 +487,12 @@ typedef struct NfsRec_ {
 		/* statistics; how many NfsNodes are
 		 * currently alive.
 		 */
-	int									 nodesInUse;
+	volatile int						 nodesInUse;
 #if DEBUG & DEBUG_COUNT_NODES
 		/* statistics; how many 'NfsNode.str'
 		 * strings are currently allocated.
 		 */
-	int									 stringsInUse;
+	volatile int						 stringsInUse;
 #endif
 		/* A small number who uniquely
 		 * identifies a mounted NFS within
@@ -583,10 +583,10 @@ static int
 nfs_sattr(NfsNode node, sattr *arg, u_long mask);
 
 extern struct _rtems_filesystem_operations_table nfs_fs_ops;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_file_file_handlers;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
-extern struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
-extern		   rtems_driver_address_table		 drvNfs;
+static struct _rtems_filesystem_file_handlers_r	 nfs_file_file_handlers;
+static struct _rtems_filesystem_file_handlers_r	 nfs_dir_file_handlers;
+static struct _rtems_filesystem_file_handlers_r	 nfs_link_file_handlers;
+static		   rtems_driver_address_table		 drvNfs;
 
 int
 nfsMountsShow(FILE*);
@@ -962,7 +962,7 @@ entry	dummy;
 
 	dummy.nextentry   = 0;
 	dummy.name        = "somename"; /* guess average length of a filename */
-	dirres_entry_size = xdr_sizeof(xdr_entry, &dummy);
+	dirres_entry_size = xdr_sizeof((xdrproc_t)xdr_entry, &dummy);
 
 	assert( smallPool = rpcUdpXactPoolCreate(
 							NFS_PROGRAM,
@@ -1150,8 +1150,8 @@ updateAttr(NfsNode node, int force)
 		) {
 		if ( nfscall(node->nfs->server,
 					  NFSPROC_GETATTR,
-					  xdr_nfs_fh,	&SERP_FILE(node),
-					  xdr_attrstat, &node->serporid) )
+					  (xdrproc_t)xdr_nfs_fh,	&SERP_FILE(node),
+					  (xdrproc_t)xdr_attrstat, &node->serporid) )
 		return -1;
 
 		if ( NFS_OK != node->serporid.status ) {
@@ -1340,6 +1340,9 @@ char			*p     = malloc(MAXPATHLEN+1);
 Nfs				nfs    = (Nfs)pathloc->mt_entry->fs_info;
 RpcUdpServer	server = nfs->server;
 unsigned long	flags;
+#if DEBUG & DEBUG_COUNT_NODES
+unsigned long	niu,siu;
+#endif
 
 	if ( !p ) {
 		e = ENOMEM;
@@ -1497,8 +1500,8 @@ unsigned long	flags;
 
 		if ( nfscall(server,
 						 NFSPROC_LOOKUP,
-						 xdr_diropargs, &SERP_FILE(node),
-						 xdr_serporid,  &node->serporid) ||
+						 (xdrproc_t)xdr_diropargs, &SERP_FILE(node),
+						 (xdrproc_t)xdr_serporid,  &node->serporid) ||
 			NFS_OK != (errno=node->serporid.status) ) {
 			e = errno;
 			goto cleanup;
@@ -1533,8 +1536,8 @@ unsigned long	flags;
 
 		if ( (nfscall(nfs->server,
 						NFSPROC_GETATTR,
-						xdr_nfs_fh,   &SERP_FILE(node),
-						xdr_attrstat, &node->serporid) && !errno && (errno = EIO)) ||
+						(xdrproc_t)xdr_nfs_fh,   &SERP_FILE(node),
+						(xdrproc_t)xdr_attrstat, &node->serporid) && !errno && (errno = EIO)) ||
 		     (NFS_OK != (errno=node->serporid.status) ) ) {
 			goto cleanup;
 		}
@@ -1599,15 +1602,21 @@ unsigned long	flags;
 
 cleanup:
 	free(p);
+#if DEBUG & DEBUG_COUNT_NODES
+	/* cache counters; nfs may be unmounted by other thread after the last
+	 * node is destroyed
+	 */
+	niu = nfs->nodesInUse;
+	siu = nfs->stringsInUse;
+#endif
 	if (node) {
 		nfsNodeDestroy(node);
 		pathloc->node_access = 0;
 	}
 #if DEBUG & DEBUG_COUNT_NODES
-	/* slightly unsafe; nfs could be unmounted/destroyed by other thread at this point */
 	fprintf(stderr,
 			"leaving evalpath, in use count is %i nodes, %i strings\n",
-			nfs->nodesInUse, nfs->stringsInUse);
+			niu,siu);
 #endif
 	if (e) {
 #if DEBUG & DEBUG_EVALPATH
@@ -1673,8 +1682,8 @@ NfsNode tNode = to_loc->node_access;
 
 	if ( nfscall(tNode->nfs->server,
 					  NFSPROC_LINK,
-					  xdr_linkargs,	&SERP_FILE(tNode),
-					  xdr_nfsstat,	&status)
+					  (xdrproc_t)xdr_linkargs,	&SERP_FILE(tNode),
+					  (xdrproc_t)xdr_nfsstat,	&status)
 	     || (NFS_OK != (errno = status))
 	   ) {
 #if DEBUG & DEBUG_SYSCALLS
@@ -1713,8 +1722,8 @@ char			*name = NFSPROC_REMOVE == proc ?
 
 	if ( nfscall(nfs->server,
 				 proc,
-				 xdr_diropargs,	&node->args,
-				 xdr_nfsstat,	&status)
+				 (xdrproc_t)xdr_diropargs,	&node->args,
+				 (xdrproc_t)xdr_nfsstat,	&status)
 	     || (NFS_OK != (errno = status))
 	    ) {
 #if DEBUG & DEBUG_SYSCALLS
@@ -1895,8 +1904,8 @@ char				*path     = mt_entry->dev;
 	 */
 	if ( nfscall(nfsServer,
 					 NFSPROC_NULL,
-					 xdr_void, 0,
-					 xdr_void, 0) ) {
+					 (xdrproc_t)xdr_void, 0,
+					 (xdrproc_t)xdr_void, 0) ) {
 
 		fputs("NFS Ping ",stderr);
 		fwrite(host, 1, path-host-1, stderr);
@@ -1917,9 +1926,9 @@ char				*path     = mt_entry->dev;
 
 	stat = mntcall( &saddr,
 					MOUNTPROC_MNT,
-					xdr_dirpath,
+					(xdrproc_t)xdr_dirpath,
 					&path,
-					xdr_fhstatus,
+					(xdrproc_t)xdr_fhstatus,
 					&fhstat,
 				 	uid,
 				 	gid );
@@ -2011,8 +2020,8 @@ LOCK(nfsGlob.llock);
 	
 	stat = mntcall( &saddr,
 					MOUNTPROC_UMNT,
-					xdr_dirpath, &path,
-					xdr_void,	 0,
+					(xdrproc_t)xdr_dirpath, &path,
+					(xdrproc_t)xdr_void,	 0,
 				    uid,
 				    gid
 				  );
@@ -2105,8 +2114,8 @@ mode_t					type = S_IFMT & mode;
 
 	if ( nfscall( node->nfs->server,
 						NFSPROC_CREATE,
-						xdr_createargs,	&SERP_FILE(node),
-						xdr_diropres,	&res)
+						(xdrproc_t)xdr_createargs,	&SERP_FILE(node),
+						(xdrproc_t)xdr_diropres,	&res)
 		|| (NFS_OK != (errno = res.status)) ) {
 #if DEBUG & DEBUG_SYSCALLS
 		perror("nfs_mknod");
@@ -2166,8 +2175,8 @@ NfsNode					node = loc->node_access;
 
 	if ( nfscall( node->nfs->server,
 						NFSPROC_SYMLINK,
-						xdr_symlinkargs,	&SERP_FILE(node),
-						xdr_nfsstat,		&status)
+						(xdrproc_t)xdr_symlinkargs,	&SERP_FILE(node),
+						(xdrproc_t)xdr_nfsstat,		&status)
 		|| (NFS_OK != (errno = status)) ) {
 #if DEBUG & DEBUG_SYSCALLS
 		perror("nfs_symlink");
@@ -2195,16 +2204,16 @@ int					rval;
 
 	if ( (rval = nfscall(nfs->server,
 							NFSPROC_READLINK,
-							xdr_nfs_fh,      		&SERP_FILE(node),
-							xdr_readlinkres_strbuf, &rr)) ) {
+							(xdrproc_t)xdr_nfs_fh,      		&SERP_FILE(node),
+							(xdrproc_t)xdr_readlinkres_strbuf, &rr)) ) {
 		if (wasAlloced)
-			xdr_free( xdr_strbuf, (caddr_t)&rr.strbuf );
+			xdr_free( (xdrproc_t)xdr_strbuf, (caddr_t)&rr.strbuf );
 	}
 
 
 	if (NFS_OK != rr.status) {
 		if (wasAlloced)
-			xdr_free( xdr_strbuf, (caddr_t)&rr.strbuf );
+			xdr_free( (xdrproc_t)xdr_strbuf, (caddr_t)&rr.strbuf );
 		rtems_set_errno_and_return_minus_one(rr.status);
 	}
 
@@ -2538,8 +2547,8 @@ Nfs		nfs  = node->nfs;
 
 	if ( nfscall(	nfs->server,
 						NFSPROC_READ,
-						xdr_readargs,	&SERP_FILE(node),
-						xdr_readres,	&rr) ) {
+						(xdrproc_t)xdr_readargs,	&SERP_FILE(node),
+						(xdrproc_t)xdr_readres,	&rr) ) {
 		return -1;
 	}
 
@@ -2606,8 +2615,8 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 	if ( nfscall(
 					server,
 					NFSPROC_READDIR,
-					xdr_readdirargs, &di->readdirargs,
-					xdr_dir_info,    di) ) {
+					(xdrproc_t)xdr_readdirargs, &di->readdirargs,
+					(xdrproc_t)xdr_dir_info,    di) ) {
 		return -1;
 	}
 
@@ -2654,8 +2663,8 @@ int			e;
 
 	if ( nfscall(	nfs->server,
 						NFSPROC_WRITE,
-						xdr_writeargs,	&SERP_FILE(node),
-						xdr_attrstat,	&node->serporid) ) {
+						(xdrproc_t)xdr_writeargs,	&SERP_FILE(node),
+						(xdrproc_t)xdr_attrstat,	&node->serporid) ) {
 		return -1;
 	}
 
@@ -2915,8 +2924,8 @@ u_int					mode;
 
 	if ( nfscall( node->nfs->server,
 						NFSPROC_SETATTR,
-						xdr_sattrargs,	&SERP_FILE(node),
-						xdr_attrstat,	&node->serporid) ) {
+						(xdrproc_t)xdr_sattrargs,	&SERP_FILE(node),
+						(xdrproc_t)xdr_attrstat,	&node->serporid) ) {
 #if DEBUG & DEBUG_SYSCALLS
 		fprintf(stderr,
 				"nfs_sattr (mask 0x%08x): %s",

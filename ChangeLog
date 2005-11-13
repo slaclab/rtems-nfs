@@ -1,5 +1,15 @@
 Changes since RTEMS-NFS 1.2:
  NFS:
+ - added _KERNEL definition for 4.7 compilation
+ - silenced compiler warnings (4.7)
+ - new locking scheme. The 'in-use' counters cannot be protected by a mutex
+   because files might be closed when a thread is deleted from a dispatch-disabled
+   section where mutexes must not be locked. The counters are now protected by
+   disabling interrupts.
+   The only critical race-condition I can see ATM is while the NFS is being
+   unmounted and the mount point is crossed by another thread. It should be the
+   generic FS code's responsibility to handle that (but AFAIK, it doesn't) --
+   it's out of our scope...
  - ftruncate didn't work. The functionality is achieved by nfs_sattr()
    setting the file size to 0. However, nfs_sattr() always tried to set
    all attributes (re-applying the current values to fields we didn't
