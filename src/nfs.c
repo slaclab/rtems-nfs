@@ -1227,7 +1227,7 @@ int		len;
 	strncpy(host, chpt, len);
 	host[len]=0;
 
-	if ( ! inet_aton(host, &psa->sin_addr) ) {
+	if ( ! inet_pton(AF_INET, host, &psa->sin_addr) ) {
 		errno = ENXIO;
 		return -1;
 	}

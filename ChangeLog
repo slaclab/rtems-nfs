@@ -1,5 +1,6 @@
 Changes since RTEMS-NFS 1.2:
  NFS:
+ - replaced inet_aton -> inet_pton
  - replaced unsigned32 -> uint32_t
  - added _KERNEL definition for 4.7 compilation
  - silenced compiler warnings (4.7)
