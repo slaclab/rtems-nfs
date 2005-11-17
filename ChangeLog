@@ -1,7 +1,9 @@
 Changes since RTEMS-NFS 1.2:
  NFS:
+ - replaced unsigned32 -> uint32_t
  - added _KERNEL definition for 4.7 compilation
  - silenced compiler warnings (4.7)
+ - added -Wno-unused-variable in 'proto' -- rpcgen produces a lot of them.
  - new locking scheme. The 'in-use' counters cannot be protected by a mutex
    because files might be closed when a thread is deleted from a dispatch-disabled
    section where mutexes must not be locked. The counters are now protected by
