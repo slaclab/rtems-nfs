@@ -458,12 +458,12 @@ xdr_serporid(XDR *xdrs, serporid *objp)
 /* assume reading a long word is atomic */
 #define READ_LONG_IS_ATOMIC
 
-typedef rtems_unsigned32	TimeStamp;
+typedef uint32_t	TimeStamp;
 
 static inline TimeStamp
 nowSeconds(void)
 {
-register rtems_unsigned32	rval;
+register uint32_t	rval;
 #ifndef READ_LONG_IS_ATOMIC
 rtems_interrupt_level		l;
 
@@ -2443,10 +2443,10 @@ struct rtems_libio_tt {
 		rtems_driver_name_t              *driver;
 		off_t                             size;      /* size of file */
 		off_t                             offset;    /* current offset into file */
-		unsigned32                        flags;
+		uint32_t                          flags;
 		rtems_filesystem_location_info_t  pathinfo;
 		Objects_Id                        sem;
-		unsigned32                        data0;     /* private to "driver" */
+		uint32_t                          data0;     /* private to "driver" */
 		void                             *data1;     /* ... */
 		void                             *file_info; /* used by file handlers */
 		rtems_filesystem_file_handlers_r *handlers;  /* type specific handlers */
@@ -2457,8 +2457,8 @@ struct rtems_libio_tt {
 static int nfs_file_open(
 	rtems_libio_t *iop,
 	const char    *pathname,
-	unsigned32     flag,
-	unsigned32     mode
+	uint32_t      flag,
+	uint32_t      mode
 )
 {
 	iop->file_info = 0;
@@ -2473,8 +2473,8 @@ static int nfs_file_open(
 static int nfs_dir_open(
 	rtems_libio_t *iop,
 	const char    *pathname,
-	unsigned32     flag,
-	unsigned32     mode
+	uint32_t      flag,
+	uint32_t      mode
 )
 {
 NfsNode		node = iop->pathinfo.node_access;
@@ -2529,7 +2529,7 @@ static int nfs_dir_close(
 static int nfs_file_read(
 	rtems_libio_t *iop,
 	void          *buffer,
-	unsigned32     count
+	uint32_t      count
 )
 {
 readres	rr;
@@ -2574,7 +2574,7 @@ Nfs		nfs  = node->nfs;
 static int nfs_dir_read(
 	rtems_libio_t *iop,
 	void          *buffer,
-	unsigned32     count
+	uint32_t      count
 )
 {
 DirInfo			di     = iop->file_info;
@@ -2633,7 +2633,7 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 static int nfs_file_write(
 	rtems_libio_t *iop,
 	const void    *buffer,
-	unsigned32    count
+	uint32_t      count
 )
 {
 NfsNode 	node = iop->pathinfo.node_access;
@@ -2687,7 +2687,7 @@ int			e;
 #ifdef DECLARE_BODY
 static int nfs_file_ioctl(
 	rtems_libio_t *iop,
-	unsigned32     command,
+	uint32_t      command,
 	void          *buffer
 )DECLARE_BODY
 #else
