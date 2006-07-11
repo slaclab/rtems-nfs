@@ -628,7 +628,7 @@ RpcUdpServer s;
 		fprintf(f,"         timed out: %10ld,   send errors: %10ld\n",
 						s->timeouts, s->errors);
 		fprintf(f,"  current retransmission interval: %dms\n",
-						s->retry_period * 1000 / ticksPerSec );
+						(unsigned)(s->retry_period * 1000 / ticksPerSec) );
 	}
 	MU_UNLOCK(llock);
 
