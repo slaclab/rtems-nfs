@@ -93,6 +93,22 @@
  */
 #define CONFIG_ATTR_LIFETIME			10/*secs*/
 
+/*
+ * The 'st_blksize' (stat(2)) value this nfs
+ * client should report. If set to zero then the server's fattr data
+ * is passed throught which is not necessary optimal.
+ * Newlib's stdio uses 'st_blksize' (if built with HAVE_BLKSIZE defined)
+ * to size the default buffer.
+ * Due to the overhead of NFS it is probably better to use the maximum
+ * size of an NFS read request (8k) rather than the optimal block
+ * size on the server.
+ * This value can be overridden at run-time by setting the global
+ * variable 'nfsStBlksize'.
+ * Thanks to Steven Johnson <sjohnson@sakuraindustries.com> for helping
+ * working on this issue.
+ */   
+#define DEFAULT_NFS_ST_BLKSIZE			NFS_MAXDATA
+
 /* dont change this without changing the maximal write size */
 #define CONFIG_NFS_BIG_XACT_SIZE		UDPMSGSIZE	/* dont change this */
 
@@ -113,7 +129,9 @@ static struct timeval _nfscalltimeout = { 10, 0 };	/* {secs, us } */
 
 
 /* NOTE: RTEMS (ss-20020301) uses a 'short st_ino' type :-( but the
- * NFS fileid is 32 bit.
+ * NFS fileid is 32 bit. [Later versions of RTEMS have fixed this;
+ * nfsInit() issues a warning if you run a version with 'short st_ino'.]
+ *
  * As a workarount, we merge the upper 16bits of the fileid into the
  * minor device no. Hence, it is still possible to uniquely identify
  * a file by looking at its device number (major = nfs, minor = part
@@ -712,6 +730,15 @@ static struct nfsstats {
 	u_short						fs_ids;
 } nfsGlob = {0/* IMPORTANT */};
 
+/*
+ * Global variable to tune the 'st_blksize' (stat(2)) value this nfs
+ * client should report.
+ * size on the server.
+ */                   
+#ifndef DEFAULT_NFS_ST_BLKSIZE
+#define DEFAULT_NFS_ST_BLKSIZE	NFS_MAXDATA
+#endif
+int nfsStBlksize = DEFAULT_NFS_ST_BLKSIZE;
 
 /* Two pools of RPC transactions;
  * One with small send buffers
@@ -2834,8 +2861,8 @@ fattr	*fa  = &SERP_ATTR(node);
 	buf->st_uid		= fa->uid;
 	buf->st_gid		= fa->gid;
 	buf->st_size	= fa->size;
-	/* TODO: set to "preferred size" of this NFS client implementation */
-	buf->st_blksize	= fa->blocksize;
+	/* Set to "preferred size" of this NFS client implementation */
+	buf->st_blksize	= nfsStBlksize ? nfsStBlksize : fa->blocksize;
 	buf->st_rdev	= fa->rdev;
 	buf->st_blocks	= fa->blocks;
 	buf->st_ino     = fa->fileid;
