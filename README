@@ -43,18 +43,19 @@ IV  Licensing & Disclaimers
 I  Overview
 -----------
 
-This package implements a simple non-caching NFS client
-for RTEMS. Most of the system calls are supported
-with the exception of 'mount', i.e. it is not possible
-to mount another FS on top of NFS (mostly because
-of the difficulty that arises when mount points are
-deleted on the server). It shouldn't be hard to do,
-though.
+This package implements a simple non-caching NFS
+client for RTEMS. Most of the system calls are
+supported with the exception of 'mount', i.e. it
+is not possible to mount another FS on top of NFS
+(mostly because of the difficulty that arises when
+mount points are deleted on the server). It
+shouldn't be hard to do, though.
 
 Note: this client supports NFS vers. 2 / MOUNT vers. 1;
       NFS Version 3 or higher are NOT supported.
 
-The package consists of two modules: RPCIOD and NFS itself.
+The package consists of two modules: RPCIOD and NFS
+itself.
 
  - RPCIOD is a UDP/RPC multiplexor daemon. It takes
    RPC requests from multiple local client threads,
@@ -77,11 +78,66 @@ The package consists of two modules: RPCIOD and NFS itself.
 
 1) Performance
 - - - - - - - -
-Performance sucks (due to the lack of readahead/delayed
-write and caching). On a fast (100Mb/s) ethernet, it
-takes about 20s to copy a 10MB file from NFS to NFS.
-I found, however, that vxWorks' NFS client doesn't seem
-to be any faster...
+Performance sucks (due to the lack of
+readahead/delayed write and caching). On a fast
+(100Mb/s) ethernet, it takes about 20s to copy a
+10MB file from NFS to NFS.  I found, however, that
+vxWorks' NFS client doesn't seem to be any
+faster...
+
+Since there is no buffer cache with read-ahead
+implemented, all NFS reads are synchronous RPC
+calls. Every read operation involves sending a
+request and waiting for the reply. As long as the
+overhead (sending request + processing it on the
+server) is significant compared to the time it
+takes to transferring the actual data, increasing
+the amount of data per request results in better
+throughput. The UDP packet size limit imposes a
+limit of 8k per RPC call, hence reading from NFS
+in chunks of 8k is better than chunks of 1k [but
+chunks >8k are not possible, i.e., simply not
+honoured: read(a_nfs_fd, buf, 20000) returns
+8192]. This is similar to the old linux days
+(mount with rsize=8k).  You can let stdio take
+care of the buffering or use 8k buffers with
+explicit read(2) operations. Note that stdio
+honours the file-system's st_blksize field
+if newlib is compiled with HAVE_BLKSIZE defined.
+In this case, stdio uses 8k buffers for files
+on NFS transparently. The blocksize NFS 
+reports can be tuned with a global variable
+setting (see nfs.c for details).
+
+Further increase of throughput can be achieved
+with read-ahead (issuing RPC calls in parallel
+[send out request for block n+1 while you are
+waiting for data of block n to arrive]).  Since
+this is not handled by the file system itself, you
+would have to code this yourself e.g., using
+parallel threads to read from a single file from
+interleaved offsets.
+
+Another obvious improvement can be achieved if
+processing the data takes a significant amount of
+time. Then, having a pipeline of threads for
+reading data and processing them makes sense
+[thread b processes chunk n while thread a blocks
+in read(chunk n+1)].
+
+Some performance figures:
+Software: src/nfsTest.c:nfsReadTest() [data not
+          processed in any way].
+Hardware: MVME6100
+Network:  100baseT-FD
+Server:   Linux-2.6/RHEL4-smp [dell precision 420]
+File:     10MB
+
+Results:
+Single threaded ('normal') NFS read, 1k buffers: 3.46s (2.89MB/s)
+Single threaded ('normal') NFS read, 8k buffers: 1.31s (7.63MB/s)
+Multi  threaded; 2 readers, 8k buffers/xfers:    1.12s (8.9 MB/s)  
+Multi  threaded; 3 readers, 8k buffers/xfers:    1.04s (9.6 MB/s)
 
 2) Reference Platform
 - - - - - - - - - - -
