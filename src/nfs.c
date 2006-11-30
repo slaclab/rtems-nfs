@@ -843,7 +843,7 @@ register Nfs prev;
  * 			are aged).
  */
 static NfsNode
-nfsNodeCreate(Nfs nfs, nfs_fh *fh)
+nfsNodeCreate(Nfs nfs, fhandle *fh)
 {
 NfsNode	rval = malloc(sizeof(*rval));
 unsigned long flags;
@@ -1979,7 +1979,7 @@ char				*path     = mt_entry->dev;
 	/* that seemed to work - we now create the root node
 	 * and we also must obtain the root node attributes
 	 */
-	assert( rootNode = nfsNodeCreate(nfs, (nfs_fh*)&fhstat.fhstatus_u.fhs_fhandle ) );
+	assert( rootNode = nfsNodeCreate(nfs, &fhstat.fhstatus_u.fhs_fhandle) );
 
 	if ( updateAttr(rootNode, 1 /* force */) ) {
 		e = errno;
