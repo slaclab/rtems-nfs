@@ -246,7 +246,10 @@ typedef struct ListNodeRec_ {
 /* Structure representing an RPC server */
 typedef struct RpcUdpServerRec_ {
 		RpcUdpServer		next;			/* linked list of all servers; protected by hlock */
-		struct sockaddr_in	addr;
+		union {
+		struct sockaddr_in	sin;
+		struct sockaddr     sa;
+		}					addr;
 		AUTH				*auth;
 		rtems_id			authlock;		/* must MUTEX the auth object - it's not clear
 											 *  what is better:
@@ -555,7 +558,7 @@ struct pmap		pmaparg;
 
 	if (!inet_ntop(AF_INET, &paddr->sin_addr, rval->name, sizeof(rval->name)))
 		sprintf(rval->name,"?.?.?.?");
-	rval->addr 			= *paddr;
+	rval->addr.sin		= *paddr;
 
 	/* start with a long retransmission interval - it
 	 * will be adapted dynamically
@@ -1290,8 +1293,8 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 										xact->obuf.buf,
 										len,
 										0,
-										(struct sockaddr*) &srv->addr,
-										sizeof(srv->addr)
+										&srv->addr.sa,
+										sizeof(srv->addr.sin)
 #ifdef MBUF_TX
 										, xact,
 										paranoia_free,
@@ -1602,8 +1605,11 @@ sockRcv(void)
 {
 int					len,i;
 u_long				xid;
-struct sockaddr_in	fromAddr;
-int					fromLen  = sizeof(fromAddr);
+union {
+	struct sockaddr_in	sin;
+	struct sockaddr     sa;
+}					fromAddr;
+int					fromLen  = sizeof(fromAddr.sin);
 RxBuf				ibuf     = 0;
 RpcUdpXact			xact     = 0;
 
@@ -1626,7 +1632,7 @@ RpcUdpXact			xact     = 0;
 					ourSock,
 					&ibuf,
 					RPCIOD_RXBUFSZ,
-				    (struct sockaddr*)&fromAddr,
+				    &fromAddr.sa,
 				    &fromLen);
 #else
 	if ( !ibuf )
@@ -1638,7 +1644,7 @@ RpcUdpXact			xact     = 0;
 				    ibuf->buf,
 				    RPCIOD_RXBUFSZ,
 				    0,
-				    (struct sockaddr*)&fromAddr,
+				    &fromAddr.sa,
 					&fromLen);
 #endif
 
@@ -1665,16 +1671,16 @@ RpcUdpXact			xact     = 0;
 	if ( !(xact=xactHashTbl[i])                                             ||
 		   xact->obuf.xid                     != xid                        ||
 #ifdef REJECT_SERVERIP_MISMATCH
-		   xact->server->addr.sin_addr.s_addr != fromAddr.sin_addr.s_addr	||
+		   xact->server->addr.sin.sin_addr.s_addr != fromAddr.sin.sin_addr.s_addr	||
 #endif
-		   xact->server->addr.sin_port        != fromAddr.sin_port ) {
+		   xact->server->addr.sin.sin_port        != fromAddr.sin.sin_port ) {
 
 		if (xact) {
 			if (
 #ifdef REJECT_SERVERIP_MISMATCH
-			    xact->server->addr.sin_addr.s_addr == fromAddr.sin_addr.s_addr &&
+			    xact->server->addr.sin.sin_addr.s_addr == fromAddr.sin.sin_addr.s_addr &&
 #endif
-		        xact->server->addr.sin_port        == fromAddr.sin_port        &&
+		        xact->server->addr.sin.sin_port        == fromAddr.sin.sin_port        &&
 			    ( xact->obuf.xid                   == xid + XACT_HASHS   ||
 				  xact->obuf.xid                   == xid + 2*XACT_HASHS    )
 				) {
@@ -1686,11 +1692,11 @@ RpcUdpXact			xact     = 0;
 			fprintf(stderr,"xact: xid  0x%08lx  -- got 0x%08lx\n",
 							xact->obuf.xid, xid);
 			fprintf(stderr,"xact: addr 0x%08lx  -- got 0x%08lx\n",
-							xact->server->addr.sin_addr.s_addr,
-							fromAddr.sin_addr.s_addr);
+							xact->server->addr.sin.sin_addr.s_addr,
+							fromAddr.sin.sin_addr.s_addr);
 			fprintf(stderr,"xact: port 0x%08x  -- got 0x%08x\n",
-							xact->server->addr.sin_port,
-							fromAddr.sin_port);
+							xact->server->addr.sin.sin_port,
+							fromAddr.sin.sin_port);
 			}
 		} else {
 			fprintf(stderr,
