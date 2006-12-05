@@ -76,6 +76,12 @@
 #include "rpcio.h"
  */
 
+/* Priority of daemon; may be setup prior to calling rpcUdpInit();
+ * otherwise the network task priority from the rtems_bsdnet_config
+ * is used...
+ */
+extern rtems_task_priority rpciodPriority;
+
 /* Initialize the driver
  *
  * RETURNS: 0 on success, -1 on failure

@@ -56,6 +56,7 @@
  
 #include <rtems.h>
 #include <rtems/error.h>
+#include <rtems/rtems_bsdnet.h>
 #include <stdlib.h>
 #include <time.h>
 #include <rpc/rpc.h>
@@ -104,7 +105,7 @@
 
 /* daemon task parameters */
 #define RPCIOD_STACK		10000
-#define RPCIOD_PRIO			50
+#define RPCIOD_PRIO			100	/* *fallback* priority */
 
 /* depth of the message queue for sending
  * RPC requests to the daemon
@@ -385,6 +386,9 @@ static rtems_id			fini	= 0;		/* a synchronization semaphore we use during
 static rtems_interval	ticksPerSec;		/* cached system clock rate (WHO IS ASSUMED NOT
 											 * TO CHANGE)
 											 */
+
+rtems_task_priority		rpciodPriority = 0;
+
 #if (DEBUG) & DEBUG_MALLOC
 /* malloc wrappers for debugging */
 static int nibufs = 0;
@@ -922,9 +926,15 @@ struct sockwakeup	wkup;
 			MU_CREAT( &hlock );
 			MU_CREAT( &llock );
 
+			if ( !rpciodPriority ) {
+				/* use configured networking priority */
+				if ( ! (rpciodPriority = rtems_bsdnet_config.network_task_priority) )
+					rpciodPriority = RPCIOD_PRIO;	/* fallback value */
+			}
+
 			assert( RTEMS_SUCCESSFUL == rtems_task_create(
 											rtems_build_name('R','P','C','d'),
-											RPCIOD_PRIO,
+											rpciodPriority,
 											RPCIOD_STACK,
 											RTEMS_DEFAULT_MODES,
 											/* fprintf saves/restores FP registers on PPC :-( */

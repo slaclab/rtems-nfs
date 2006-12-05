@@ -1,4 +1,7 @@
 Changes since RTEMS-NFS 1.3:
+RPCIOD:
+ - Made task priority run-time configurable (and read from rtems_bsdnet_config
+   by default).
 NFS:
  - Minor mod. to fix 'type-punned pointer' warning (can avoid pointer cast).
  - Added global variable 'nfsStBlksize' (defaults to 8k) which is now
