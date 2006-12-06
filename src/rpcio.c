@@ -1281,6 +1281,15 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 
 					srv->timeouts++;
 
+					/* Change the ID - there might still be
+					 * a reply on the way. When it arrives we
+					 * must not find it's ID in the hash table
+					 *
+					 * Thanks to Steven Johnson for hunting this
+					 * one down.
+					 */
+					xact->obuf.xid        += XACT_HASHS;
+
 #if (DEBUG) & DEBUG_TIMEOUT
 					fprintf(stderr,"RPCIO XACT timed out; waking up requestor\n");
 #endif
