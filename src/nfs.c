@@ -3401,3 +3401,37 @@ cleanup:
 
 	return status;
 }
+
+int
+nfsSetTimeout(uint32_t timeout_ms)
+{
+rtems_interrupt_level k;
+uint32_t	          s,us;
+
+	if ( timeout_ms > 100000 ) {
+		/* out of range */
+		return -1;
+	}
+
+	s  = timeout_ms/1000;
+	us = (timeout_ms % 1000) * 1000;
+
+	rtems_interrupt_disable(k);
+	_nfscalltimeout.tv_sec  = s;
+	_nfscalltimeout.tv_usec = us;
+	rtems_interrupt_enable(k);
+
+	return 0;
+}
+
+uint32_t
+nfsGetTimeout()
+{
+rtems_interrupt_level k;
+uint32_t              s,us;
+	rtems_interrupt_disable(k);
+	s  = _nfscalltimeout.tv_sec;
+	us = _nfscalltimeout.tv_usec;
+	rtems_interrupt_enable(k);
+	return s*1000 + us/1000;
+}

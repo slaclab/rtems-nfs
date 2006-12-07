@@ -755,7 +755,11 @@ va_list			ap;
 
 	ms = 1000 * timeout->tv_sec + timeout->tv_usec/1000;
 
-	xact->lifetime  = ms * ticksPerSec / 1000;
+	/* round lifetime to closest # of ticks */
+	xact->lifetime  = (ms * ticksPerSec + 500) / 1000;
+	if ( 0 == xact->lifetime )
+		xact->lifetime = 1;
+
 #if (DEBUG) & DEBUG_TIMEOUT
 	{
 	static int once=0;
@@ -1377,8 +1381,13 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 							srv->requests++;
 						}
 						xact->trip      = now;
-						xact->age       = now + srv->retry_period;
-						xact->tolive   -= srv->retry_period;
+						{
+						long capped_period = srv->retry_period;
+							if ( xact->lifetime < capped_period )
+								capped_period = xact->lifetime;
+						xact->age       = now + capped_period;
+						xact->tolive   -= capped_period;
+						}
 						/* enqueue to the list of newly sent transactions */
 						xact->node.next = newList;
 						newList         = &xact->node;

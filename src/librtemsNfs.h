@@ -161,4 +161,17 @@ extern struct _rtems_filesystem_operations_table nfs_fs_ops;
  */
 rtems_status_code
 rtems_filesystem_resolve_location(char *buf, int len, rtems_filesystem_location_info_t *loc);
+
+/* Set the timeout (initial default: 10s) for NFS and mount calls.
+ *
+ * RETURNS 0 on success, nonzero if the requested timeout is less than
+ * a clock tick or if the system clock rate cannot be determined.
+ */
+
+int
+nfsSetTimeout(uint32_t timeout_ms);
+
+/* Read current timeout (in milliseconds) */
+uint32_t
+nfsGetTimeout();
 #endif
