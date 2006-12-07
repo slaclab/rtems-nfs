@@ -61,10 +61,10 @@ $(LIB): ${OBJS}
 	$(make-library)
 
 %_xdr.c: %.x %.h
-	rpcgen -c $< > $@
+	rpcgen -c -C $< > $@
 
 %.h: %.x
-	rpcgen -h $< > $@
+	rpcgen -h -C $< > $@
 
 .PRECIOUS: $(XFILES:%.x=%.h) $(XFILES:%.x=%_xdr.c)
 
