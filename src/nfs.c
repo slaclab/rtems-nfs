@@ -2553,7 +2553,7 @@ static int nfs_dir_close(
 
 #define nfs_link_close 0
 
-static int nfs_file_read(
+static ssize_t nfs_file_read(
 	rtems_libio_t *iop,
 	void          *buffer,
 	size_t        count
@@ -2598,7 +2598,7 @@ Nfs		nfs  = node->nfs;
 }
 
 /* this is called by readdir() / getdents() */
-static int nfs_dir_read(
+static ssize_t nfs_dir_read(
 	rtems_libio_t *iop,
 	void          *buffer,
 	size_t        count
@@ -2657,7 +2657,7 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 
 #define nfs_link_read 0
 
-static int nfs_file_write(
+static ssize_t nfs_file_write(
 	rtems_libio_t *iop,
 	const void    *buffer,
 	size_t        count
