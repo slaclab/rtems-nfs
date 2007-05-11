@@ -2556,7 +2556,7 @@ static int nfs_dir_close(
 static int nfs_file_read(
 	rtems_libio_t *iop,
 	void          *buffer,
-	uint32_t      count
+	size_t        count
 )
 {
 readres	rr;
@@ -2601,7 +2601,7 @@ Nfs		nfs  = node->nfs;
 static int nfs_dir_read(
 	rtems_libio_t *iop,
 	void          *buffer,
-	uint32_t      count
+	size_t        count
 )
 {
 DirInfo			di     = iop->file_info;
@@ -2660,7 +2660,7 @@ RpcUdpServer	server = ((Nfs)iop->pathinfo.mt_entry->fs_info)->server;
 static int nfs_file_write(
 	rtems_libio_t *iop,
 	const void    *buffer,
-	uint32_t      count
+	size_t        count
 )
 {
 NfsNode 	node = iop->pathinfo.node_access;
