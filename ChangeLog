@@ -1,4 +1,7 @@
 Changes since RTEMS-NFS 1.4:
+LICENSE:
+ - changed license terms; RTEMS-NFS is now released under the more liberal
+   'SLAC license'.
 NFS:
  - silenced compiler warnings (follow handler declaration changes in libio.h
    by using 'size_t' instead of 'uint32_t' etc.).

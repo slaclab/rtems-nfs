@@ -523,7 +523,7 @@ I recommend to use the patch distributed with RTEMS-NFS.
 IV Licensing & Disclaimers
 --------------------------
 
-NFS is distributed under the EPICS Open License - consult the
+NFS is distributed under the SLAC License - consult the
 separate 'LICENSE' file.
 
 Government disclaimer of liability
@@ -539,11 +539,6 @@ Stanford disclaimer of liability
 - - - - - - - - - - - - - - - - -
 Stanford University makes no representations or warranties, express or
 implied, nor assumes any liability for the use of this software.
-
-This product is subject to the EPICS open license
-- - - - - - - - - - - - - - - - - - - - - - - - - 
-Consult the LICENSE file or http://www.aps.anl.gov/epics/license/open.php
-for more information.
 
 Maintenance of notice
 - - - - - - - - - - -
