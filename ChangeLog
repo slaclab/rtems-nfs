@@ -1,3 +1,6 @@
+Changes since RTEMS-NFS 1.5:
+ - rtems_message_queue_receive() length argument is a 'size_t' (later rtems
+   versions).
 Changes since RTEMS-NFS 1.4:
 LICENSE:
  - changed license terms; RTEMS-NFS is now released under the more liberal
