@@ -929,6 +929,7 @@ NfsNode rval = nfsNodeCreate(node->nfs, 0);
 		if (node->str) {
 			rval->args.name = rval->str = strdup(node->str);
 			if (!rval->str) {
+				errno = ENOMEM;
 				nfsNodeDestroy(rval);
 				return 0;
 			}
@@ -1382,6 +1383,7 @@ unsigned long	niu,siu;
 	}
 	strcpy(p, pathname);
 
+	/* clone the node */
 	LOCK(nfsGlob.lock);
 	node = nfsNodeClone(node);
 	UNLOCK(nfsGlob.lock);
@@ -1390,9 +1392,13 @@ unsigned long	niu,siu;
 	 * since the node refcount is > 1
 	 */
 	
-	/* clone the node */
 	if ( !node ) {
-		/* nodeClone sets errno */
+		/* nodeClone should have set errno */
+		pathloc->node_access = 0;
+		if ( ! (e = errno) ) {
+			/* if we have no node, e must not be zero! */
+			e = ENOMEM;
+		}
 		goto cleanup;
 	}
 
