@@ -3,7 +3,7 @@ Changes since RTEMS-NFS 1.5:
            1. server had been alive in the past
            2. server connectivity is lost
            the bug, if triggered, caused memory corruption.
-           
+   (fixes PR#1284)          
  - rtems_message_queue_receive() length argument is a 'size_t' (later rtems
    versions).
 Changes since RTEMS-NFS 1.4:
