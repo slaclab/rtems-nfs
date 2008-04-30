@@ -280,9 +280,6 @@ typedef struct RpcUdpServerRec_ {
 		unsigned long		requests;		/* how many requests have been sent                    */
 		unsigned long       timeouts;		/* how many requests have timed out                    */
 		unsigned long       errors;         /* how many errors have occurred (other than timeouts) */
-		unsigned long       zrtry;          /* TSILL */
-#define TSILL 40
-		unsigned long       huntxid[TSILL];    /* TSILL */
 		char				name[20];		/* server's address in IP 'dot' notation               */
 } RpcUdpServerRec;
 
@@ -646,13 +643,6 @@ RpcUdpServer s;
 						s->timeouts, s->errors);
 		fprintf(f,"  current retransmission interval: %dms\n",
 						(unsigned)(s->retry_period * 1000 / ticksPerSec) );
-		{
-		int i;
-		fprintf(f, "  hunted XIDs 0x%08lx\n", s->zrtry);
-		for ( i=0; i<s->zrtry; i++ ) {
-			fprintf(f, "    XID 0x%08lx\n", s->huntxid[i]);
-		}
-		}
 	}
 	MU_UNLOCK(llock);
 
@@ -1398,9 +1388,6 @@ unsigned long	  max_period = RPCIOD_RETX_CAP_S * ticksPerSec;
 							srv->requests++;
 						}
 						xact->trip      = now;
-						if ( 0 == srv->retry_period && srv->zrtry < TSILL ) {
-							srv->huntxid[srv->zrtry++] = xact->obuf.xid;
-						}
 						{
 						long capped_period = srv->retry_period;
 							if ( xact->lifetime < capped_period )

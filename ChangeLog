@@ -1,6 +1,8 @@
-Changes since RTEMS-NFS 1.5:
+Changes since RTEMS-NFS 1.7:
+Changes since RTEMS-NFS 1.6:
  - when using rtems-style installation path (w/o SSRL tweaks) headers
    must be installed to '<bspdir>/lib/include', not '<bspdir>/include'.
+Changes since RTEMS-NFS 1.5:
  - BUGFIX: path lookup ('evalpath') would erroneously return 0 (success) if
            1. server had been alive in the past
            2. server connectivity is lost
