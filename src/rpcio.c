@@ -1,8 +1,4 @@
-<<<<<<< rpcio.c
 /* $Id$ */
-=======
-/* $Id$ */
->>>>>>> 1.45
 
 /* RPC multiplexor for a multitasking environment */
 
