@@ -1,8 +1,4 @@
-<<<<<<< nfs.c
 /* $Id$ */
-=======
-/* $Id$ */
->>>>>>> 1.50
 
 /* NFS client implementation for RTEMS; hooks into the RTEMS filesystem */
 
