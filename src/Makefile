@@ -7,7 +7,7 @@
 
 # if you have CEXP set this variable to 'YES'
 # and some "help" info will be compiled in.
-HAVE_CEXP=YES
+HAVE_CEXP:=$(shell if test -f ../../cexp/cexpHelp.h ; then echo YES ; else echo NO; fi)
 
 # C source names, if any, go here -- minus the .c
 C_PIECES_YES=rpcio nfs sock_mbuf xdr_mbuf dirutils rpcio.modini nfs.modini cexphelp
@@ -77,6 +77,11 @@ CLOBBER_ADDITIONS +=
 
 ifndef RTEMS_SITE_INSTALLDIR
 RTEMS_SITE_INSTALLDIR = $(PROJECT_RELEASE)
+RTEMS_SITE_INCINSTDIR = $(PROJECT_RELEASE)/lib/include
+else
+ifndef RTEMS_SITE_INCINSTDIR
+RTEMS_SITE_INCINSTDIR = $(RTEMS_SITE_INSTALLDIR)/include
+endif
 endif
 
 %nfs.obj: %nfs.o %nfs.modini.o
@@ -101,4 +106,4 @@ tar:
 install:  all
 	$(INSTALL_VARIANT) -m 555 ${PGMS} ${RTEMS_SITE_INSTALLDIR}/bin
 	$(INSTALL_VARIANT) -m 555 ${LIB}  ${RTEMS_SITE_INSTALLDIR}/lib
-	$(INSTALL_CHANGE) -m 444 ${INST_HEADERS}  ${RTEMS_SITE_INSTALLDIR}/include
+	$(INSTALL_CHANGE) -m 444 ${INST_HEADERS}  ${RTEMS_SITE_INCINSTDIR}

@@ -1,4 +1,8 @@
+<<<<<<< nfs.c
 /* $Id$ */
+=======
+/* $Id$ */
+>>>>>>> 1.50
 
 /* NFS client implementation for RTEMS; hooks into the RTEMS filesystem */
 
@@ -2401,6 +2405,11 @@ int	 							rval = RVAL_ERR_AND_DO_FREENODE;
 			rtems_filesystem_freenode(pathloc);
 
 			if (rtems_filesystem_evaluate_path(buf, flags, pathloc, 1)) {
+				/* If evalpath fails then there is no valid node
+				 * attached to pathloc; hence we must not attempt
+				 * to free the node
+				 */
+				rval = RVAL_ERR_BUT_DONT_FREENODE;
 				goto cleanup;
 			}
 		}
