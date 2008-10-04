@@ -51,10 +51,6 @@
  * ------------------ SLAC Software Notices, Set 4 OTT.002a, 2004 FEB 03
  */ 
 
-#ifdef	HAVE_CONFIG_H
-#include <config.h>
-#endif
-
 #include <rtems.h>
 #include <rtems/libio.h>
 #include <rtems/libio_.h>
@@ -69,11 +65,6 @@
 #include <ctype.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-
-
-#ifdef HAVE_CEXP_H
-#include <cexpHelp.h>
-#endif
 
 /* RPCIO driver interface.
  * If you need RPCIO for other purposes than NFS
