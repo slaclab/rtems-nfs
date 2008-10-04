@@ -1,0 +1,9 @@
+AUTOMAKE_OPTIONS = foreign
+
+SUBDIRS =
+
+if BUILD_RTEMS_NFS
+SUBDIRS+= proto
+endif
+
+SUBDIRS+= src
