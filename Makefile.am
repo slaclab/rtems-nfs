@@ -7,3 +7,4 @@ SUBDIRS+= proto
 endif
 
 SUBDIRS+= src
+DIST_SUBDIRS=src proto
