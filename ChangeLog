@@ -1,4 +1,6 @@
 Changes since RTEMS-NFS 1.8:
+ - src/dirutils.c: Cast size st_size and st_mode to (unsigned long) when passing
+   to printf in order to silence compiler warnings (rtems-4.10).
 Changes since RTEMS-NFS 1.7:
  - BUGFIX: must not attempt to release node if rtems_filesystem_evaluate_path()
    fails in nfs_eval_link() since pathloc contains no valid node.

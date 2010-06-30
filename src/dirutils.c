@@ -108,12 +108,12 @@ char *t;
 						t = "@"; break;
 	}
 
-	printf("%10li, %10lib, %5i.%-5i 0%04o %s%s\n",
+	printf("%10li, %10lib, %5i.%-5i 0%04lo %s%s\n",
 				buf->st_ino,
-				buf->st_size,
+				(unsigned long)buf->st_size,
 				buf->st_uid,
 				buf->st_gid,
-				buf->st_mode & ~S_IFMT,
+				(unsigned long)(buf->st_mode & ~S_IFMT),
 				name,
 				t);
 	*chpt = 0;
