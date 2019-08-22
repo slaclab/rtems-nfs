@@ -1,5 +1,3 @@
-/* $Id$ */
-
 /* NFS client implementation for RTEMS; hooks into the RTEMS filesystem */
 
 /* Author: Till Straumann <strauman@slac.stanford.edu> 2002 */
@@ -967,8 +965,7 @@ nfsInit(int smallPoolDepth, int bigPoolDepth)
 {  
 entry	dummy;
 
-	fprintf(stderr,"This is RTEMS-NFS Release $Name$\n");
-	fprintf(stderr,"($Id$)\n\n");
+	fprintf(stderr,"This is RTEMS-NFS Release %s\n", PACKAGE_VERSION);
 	fprintf(stderr,"Till Straumann, Stanford/SLAC/SSRL 2002\n");
 	fprintf(stderr,"See LICENSE file for licensing info\n");
 

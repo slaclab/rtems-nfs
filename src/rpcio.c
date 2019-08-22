@@ -1,5 +1,3 @@
-/* $Id$ */
-
 /* RPC multiplexor for a multitasking environment */
 
 /* Author: Till Straumann <strauman@slac.stanford.edu>, 2002 */
@@ -920,8 +918,7 @@ rpcUdpInit(void)
 int					noblock = 1;
 struct sockwakeup	wkup;
 
-	fprintf(stderr,"This is RTEMS-RPCIOD Release $Name$\n");
-	fprintf(stderr,"($Id$)\n\n");
+	fprintf(stderr,"This is RTEMS-RPCIOD Release %s\n", PACKAGE_VERSION);
 	fprintf(stderr,"Till Straumann, Stanford/SLAC/SSRL 2002\n");
 	fprintf(stderr,"See LICENSE file for licensing info\n");
 
