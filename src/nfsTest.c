@@ -1,4 +1,3 @@
-/* $Id$ */
 
 /* Test program for evaluating NFS read throughput */
 

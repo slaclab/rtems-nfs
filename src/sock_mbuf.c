@@ -1,5 +1,4 @@
 /*
- *  $Id$
  *
  *  NOTE:
  *    This is derived from libnetworking/rtems/rtems_syscall.c
