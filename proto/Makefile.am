@@ -1,4 +1,3 @@
-#  $Id$
 AUTOMAKE_OPTIONS=foreign
 
 include $(top_srcdir)/rtems-pre.am
