@@ -1,4 +1,3 @@
-/* $Id$ */
 
 /* very crude and basic fs utilities for testing the NFS */
 
